@@ -3,9 +3,9 @@
 Living status. Updated at the end of every phase.
 Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered AI Agent Reliability & Reasoning Layer.md`
 
-**Current phase:** Phase 1 — Repository Intelligence (next)
+**Current phase:** Phase 2 — Intent Gateway + Complexity + Planning Governor (next)
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
-**Suite:** 84 tests passing · ruff clean
+**Suite:** 128 tests passing · ruff clean
 
 ---
 
@@ -14,8 +14,8 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | Phase | Name | Status | Exit criteria |
 |---|---|---|---|
 | 0 | Foundation + hook plumbing spike | ✅ **done** | all met — see below |
-| 1 | Repository Intelligence | ⬜ next | — |
-| 2 | Intent Gateway + Complexity + Planning Governor | ⬜ not started | — |
+| 1 | Repository Intelligence | ✅ **done** | all met — see below |
+| 2 | Intent Gateway + Complexity + Planning Governor | ⬜ next | — |
 | 3 | Evidence Engine + Contradiction Engine | ⬜ not started | — |
 | 4 | Action Validator + Verification + Completion Gate | ⬜ not started | — |
 | 5 | Full Claude Code adapter + install UX | ⬜ not started | — |
@@ -34,6 +34,19 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ done with cave
 | Hot path < 100 ms p95 (SPEC §8) | ✅ **0.98 ms p95** kept-alive; **9.09 ms p95** with a fresh connection per call |
 | Killing the daemon mid-session does not impede the agent | ✅ 12 distinct fail-open paths tested |
 | No LLM anywhere in the core (SPEC §6) | ✅ manifest scan + import scan + live socket watch |
+
+## Phase 1 — exit criteria
+
+| Criterion | Result |
+|---|---|
+| Golden fixture repos assert correct symbol/import/test maps | ✅ 44 tests over a Python and a TypeScript fixture |
+| Incremental update after edit / add / delete / rename | ✅ including symbol rename and dependency-graph rebuild |
+| Index build time on a large repo | ✅ **5.6 s** for 1,887 source files (42k-file monorepo) — hence async build |
+| Warm lookup < 5 ms | ✅ **1.6 µs** per call (~3,000× under) |
+| Hot-path latency unchanged | ✅ 0.91 ms p95 end-to-end, same as Phase 0 |
+
+Measured on a real 1,887-file monorepo: full build 5,647 ms · targeted `refresh_path`
+**0.18 ms p50** · full `refresh` with no changes 104 ms.
 
 ## Spec conformance suite
 
@@ -76,12 +89,21 @@ src/agentguard/
 │   ├── translate.py  Claude JSON ⇄ AgentEvent ⇄ hook output
 │   ├── install.py    safe settings.json merge / uninstall
 │   └── shim.py       stdlib-only fallback + --ensure-daemon
+├── repo/             ── the deterministic evidence base (§32) ──
+│   ├── models.py     FileRecord, SymbolRecord, ImportRecord, GitState, DependencyInfo
+│   ├── scanner.py    gitignore-aware discovery (git ls-files fast path + walk fallback)
+│   ├── symbols_python.py  stdlib `ast` extraction (exact, no grammar drift)
+│   ├── symbols_ts.py      tree-sitter for TS/JS/Go/Rust/Java/Ruby, optional
+│   ├── manifests.py  pyproject / requirements / package.json / go.mod / Cargo.toml
+│   ├── gitinfo.py    branch, dirty set, recent commits, per-file churn (TTL-cached)
+│   └── index.py      RepoIndex — symbol map, import + reverse-import graph, test map
 ├── daemon/app.py     FastAPI, 127.0.0.1, token auth, handshake file
-└── cli/main.py       install · uninstall · doctor · log · why · daemon
+└── cli/main.py       install · uninstall · doctor · log · why · index · find-symbol ·
+                      explain · daemon
 ```
 
-Handlers for user_prompt / pre_tool_use / post_tool_use / stop are wired but currently
-return ALLOW — Phases 2–4 fill them in.
+Handlers for user_prompt / pre_tool_use / stop are wired but currently return ALLOW —
+Phases 2–4 fill them in. post_tool_use already keeps the index fresh.
 
 ---
 
@@ -104,7 +126,20 @@ return ALLOW — Phases 2–4 fill them in.
   never runs. Fixed with an explicit handler setting `server.should_exit`. Stale handshake
   files are still treated as normal everywhere (SIGKILL exists).
 
+- **2026-08-11** — **Index build measured on a real 42k-file monorepo**: 1,887 source files
+  in 5.6 s. Too slow to sit in front of a developer, so the index builds in a background
+  thread and every query answers "unknown" until it is ready. Targeted `refresh_path()`
+  (0.18 ms) replaced full `refresh()` (104 ms) on the post-edit path.
+
 ## Design decisions worth remembering
+
+- **Positive evidence is always safe; negative evidence requires a clean parse.** A file
+  that failed to parse and a file that is genuinely empty both yield zero symbols, but only
+  the second licenses concluding a symbol is *absent*. `ParsedFile.parsed` carries that
+  distinction; conflating them would turn every syntax error into a false hallucination
+  challenge. Found by a test during Phase 1, not in production.
+- **`knows_type()` before challenging `X.y`.** The Evidence Engine may only object to a
+  missing method when it actually knows the type. Otherwise it is reasoning from ignorance.
 
 - **AgentGuard never returns `permissionDecision: "allow"`.** "allow" bypasses the user's own
   permission rules; a guard that auto-approved would make the system less safe. It can only
@@ -148,3 +183,8 @@ return ALLOW — Phases 2–4 fill them in.
 - **Phase 0 complete.** 84 tests, ruff clean. Foundation, normalized event model, SQLite
   store, metrics, Guard orchestrator, FastAPI daemon, Claude Code translation + installer +
   shim, CLI. Transport benchmarked and chosen on evidence (`docs/BENCH-latency.md`).
+- **Phase 1 complete.** 128 tests, ruff clean. Repository intelligence: scanner, Python
+  (`ast`) and tree-sitter symbol extraction, import + reverse-import graph, dependency
+  manifests, test map, git state. Fixture repos modelled on the SPEC's own §14/§33
+  examples so later phases test against the same ground truth. Index build made async
+  after measuring 5.6 s on a real monorepo. Hot-path latency unchanged.

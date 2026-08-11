@@ -136,7 +136,7 @@ def main() -> int:
 
     try:
         out = _post(hs, payload)
-    except Exception:
+    except Exception:  # noqa: BLE001 - fail open: any transport failure means "no decision"
         return 0
 
     if out:

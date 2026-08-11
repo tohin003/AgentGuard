@@ -24,18 +24,23 @@ from agentguard.core.events import AgentEvent
 from agentguard.core.metrics import M_DECISION, M_HOOK_LATENCY, METRICS, Timer
 from agentguard.core.models import Decision
 from agentguard.core.store import Store
+from agentguard.repo.index import RepoIndex
 
 log = logging.getLogger(__name__)
 
 
 class Workspace:
-    """Per-repository state: store now, RepoIndex from Phase 1 onward."""
+    """Per-repository state: the decision store and the repository index."""
 
     def __init__(self, root: Path, settings: Settings) -> None:
         self.root = root
         self.settings = settings
         self.store = Store.for_workspace(root)
-        self.index = None  # Phase 1: RepoIndex
+        # Built in the background: a large monorepo takes seconds, and no developer
+        # should wait on it. Until it is ready every query answers "unknown", which
+        # resolves to ALLOW (SPEC §39).
+        self.index = RepoIndex(root, settings.index)
+        self.index.build_async()
 
     def close(self) -> None:
         self.store.close()
@@ -119,6 +124,9 @@ class Guard:
 
     def _on_session_start(self, event: AgentEvent, ws: Workspace) -> Decision:
         ws.store.open_session(event.session_id, event.agent, str(ws.root))
+        # Creating the Workspace already kicked off the build; this hook has a 20s
+        # budget, so give it a moment to finish while the session is still starting up.
+        ws.index.ready(timeout=5.0)
         return Decision.allow()
 
     def _on_user_prompt(self, event: AgentEvent, ws: Workspace) -> Decision:
@@ -135,6 +143,15 @@ class Guard:
         return Decision.allow()
 
     def _on_post_tool_use(self, event: AgentEvent, ws: Workspace) -> Decision:
+        # Keep the evidence base honest: re-parse exactly the file that just changed
+        # (~1ms) rather than re-statting the whole tree (~100ms on a large repo).
+        if ws.index.is_built:
+            changed = event.arg("file_path") or event.arg("notebook_path")
+            if isinstance(changed, str) and changed:
+                ws.index.refresh_path(changed)
+            elif event.tool == "Bash":
+                # A shell command can touch anything; fall back to a rate-limited sweep.
+                ws.index.refresh(min_interval=2.0)
         return Decision.allow()
 
     def _on_stop(self, event: AgentEvent, ws: Workspace) -> Decision:

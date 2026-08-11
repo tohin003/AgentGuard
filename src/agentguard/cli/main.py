@@ -317,6 +317,110 @@ def why_cmd(
             _echo(f"    evidence: {ev.get('path') or ev.get('symbol') or ev.get('source')}")
 
 
+# ---------------------------------------------------------------- repository
+
+
+@app.command("index")
+def index_cmd(
+    workspace: Path = typer.Argument(Path.cwd(), help="Repository to index."),
+    verbose: bool = typer.Option(False, "-v", help="Show per-language breakdown."),
+) -> None:
+    """Build the repository index and report what it found (SPEC §32)."""
+    from agentguard.repo import RepoIndex
+
+    index = RepoIndex(workspace).build()
+    summary = index.summary()
+
+    _echo(f"{summary['root']}")
+    _echo(f"  files         {summary['files']}  ({summary['parsed_files']} parsed for symbols)")
+    _echo(f"  symbols       {summary['symbols']}")
+    _echo(f"  tests         {summary['test_files']} files covering {summary['tested_sources']} sources")
+    _echo(f"  config        {summary['config_files']}")
+    _echo(f"  dependencies  {summary['dependencies']}  from {', '.join(summary['manifests']) or '—'}")
+    _echo(f"  built in      {summary['build_ms']}ms")
+    if verbose:
+        _echo("\n  languages")
+        for lang, count in summary["languages"].items():
+            _echo(f"    {lang:<14}{count}")
+    git = index.git
+    if git.is_repo:
+        _echo(f"\n  git           {git.branch} @ {git.head[:8]}  ({len(git.dirty)} dirty)")
+
+
+@app.command("find-symbol")
+def find_symbol_cmd(
+    name: str = typer.Argument(..., help="Symbol name, bare or qualified."),
+    workspace: Path = typer.Option(Path.cwd()),
+) -> None:
+    """Look up a symbol — the core question the Evidence Engine asks (SPEC §14)."""
+    from agentguard.repo import RepoIndex
+
+    index = RepoIndex(workspace).build()
+    matches = index.find_symbol(name)
+    if not matches:
+        _bad(f"no symbol '{name}' found in {workspace}")
+        if "." in name:
+            owner = name.rsplit(".", 1)[0]
+            if index.knows_type(owner):
+                known = sorted(index.attributes_of(owner))
+                _echo(f"  '{owner}' exists and defines: {', '.join(known)}")
+            else:
+                _warn(f"  '{owner}' is also unknown — no evidence either way")
+        raise typer.Exit(1)
+
+    for symbol in matches:
+        _ok(f"{symbol.qualname}{symbol.signature}")
+        _echo(f"      {symbol.kind:<10}{symbol.path}:{symbol.line}")
+
+
+@app.command("explain")
+def explain_cmd(
+    path: str = typer.Argument(..., help="File to explain."),
+    workspace: Path = typer.Option(Path.cwd()),
+) -> None:
+    """Everything the index knows about one file: symbols, imports, dependents, tests."""
+    from agentguard.repo import RepoIndex
+
+    index = RepoIndex(workspace).build()
+    rel = index.normalize(path)
+    if not index.file_exists(rel):
+        _bad(f"{rel} is not in the index")
+        raise typer.Exit(1)
+
+    record = index.files[rel]
+    _echo(f"{rel}")
+    _echo(f"  language      {record.lang}{'  (test file)' if record.is_test else ''}")
+    _echo(f"  parsed        {'yes' if index.is_parsed(rel) else 'no — symbol evidence incomplete'}")
+
+    symbols = index.symbols_in(rel)
+    _echo(f"\n  defines ({len(symbols)})")
+    for symbol in symbols[:30]:
+        _echo(f"    {symbol.kind:<10}{symbol.qualname}  :{symbol.line}")
+    if len(symbols) > 30:
+        _echo(f"    … {len(symbols) - 30} more")
+
+    internal = [i for i in index.imports_of(rel) if i.is_internal]
+    external = [i for i in index.imports_of(rel) if not i.is_internal]
+    _echo(f"\n  imports       {len(internal)} internal, {len(external)} external")
+    for record_ in internal[:10]:
+        _echo(f"    {record_.raw}  ->  {record_.resolved}")
+
+    dependents = index.dependents_of(rel)
+    radius = index.blast_radius(rel, depth=3)
+    _echo(f"\n  dependents    {len(dependents)} direct, {len(radius)} within 3 hops")
+    for dependent in sorted(dependents)[:10]:
+        _echo(f"    {dependent}")
+
+    tests = index.tests_for(rel)
+    if tests:
+        _echo(f"\n  covered by    {len(tests)} test file(s)")
+        for test in sorted(tests):
+            _echo(f"    {test}")
+    else:
+        _echo()
+        _warn("covered by    no tests found")
+
+
 @app.command("version")
 def version_cmd() -> None:
     from agentguard import __version__

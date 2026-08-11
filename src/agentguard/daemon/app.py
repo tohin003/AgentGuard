@@ -136,7 +136,7 @@ def create_app(token: str, settings: Settings | None = None, guard: Guard | None
 
         try:
             payload = await request.json()
-        except Exception:
+        except Exception:  # noqa: BLE001 - fail open: unreadable body means "no decision"
             return JSONResponse({}, status_code=200)
 
         if not isinstance(payload, dict):

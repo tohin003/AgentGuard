@@ -51,6 +51,9 @@ packages = ["src/agentguard"]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-q --strict-markers"
+# tests/fixtures holds miniature repositories that the index is tested *against*.
+# Their contents are data, not tests, and must not be collected or imported.
+norecursedirs = ["fixtures", ".git", ".venv", "node_modules"]
 markers = [
     "spec: spec-conformance test tied to a section of the SPEC document",
     "latency: measures latency budgets (SPEC §8)",
@@ -61,9 +64,15 @@ markers = [
 line-length = 110
 src = ["src", "tests"]
 target-version = "py312"
+# Fixture repositories are deliberately imperfect sample code (unused imports, a missing
+# method, a broken parse). Linting them would defeat their purpose.
+extend-exclude = ["tests/fixtures"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# BLE (blind-except) is enabled deliberately. AgentGuard's fail-open guarantee means it
+# has a number of intentional catch-alls; enabling the rule forces each one to carry an
+# explicit `# noqa: BLE001` explaining itself, and flags any accidental new one.
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "BLE"]
 ignore = ["B008"]  # typer uses function calls in argument defaults
 
 [tool.coverage.run]
