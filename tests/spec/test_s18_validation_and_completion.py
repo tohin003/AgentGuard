@@ -591,3 +591,54 @@ class TestThroughTheGuard:
 
         assert decision.action is DecisionAction.CHALLENGE
         assert "get_active_users" in decision.reason
+
+
+class TestTestWaiver:
+    """Found in Phase 6 live validation, and diagnosed by the agent itself:
+
+        "Your hooks are in conflict. The stop gate demands a test run ... but the prompt
+        told me not to run tests ... Any task of this shape will deadlock the same way."
+
+    A gate that cannot be satisfied is the §39 failure mode. The waiver excuses *not
+    running* tests; it does not excuse tests that ran and failed, or code that no longer
+    parses.
+    """
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "Fix the paginate helper. Do not run tests.",
+            "Fix the paginate helper. Don't run the tests.",
+            "Fix paginate without running tests.",
+            "Fix paginate — skip tests.",
+        ],
+    )
+    def test_an_explicit_waiver_stands_the_gate_down(self, index, prompt):
+        state = state_for(prompt, index, touched=["src/shop/utils/pagination.py"])
+        assert state.spec.tests_waived
+        verdict = completion_gate.evaluate(state, index)
+        assert verdict.result is GateResult.PASS
+        assert "waived" in verdict.reason
+
+    def test_without_a_waiver_the_gate_still_speaks(self, index):
+        state = state_for("Fix the paginate helper.", index, touched=["src/shop/utils/pagination.py"])
+        assert not state.spec.tests_waived
+        assert completion_gate.evaluate(state, index).result is GateResult.INCOMPLETE
+
+    def test_a_waiver_does_not_excuse_failing_tests(self, index):
+        """The developer waived the work, not the truth."""
+        state = state_for(
+            "Fix paginate. Do not run tests.", index, touched=["src/shop/utils/pagination.py"]
+        )
+        state.verification.outcomes.append(
+            runners.parse_output("pytest -q", "F\n==== 1 failed, 1 passed in 0.1s ====\n")
+        )
+        assert completion_gate.evaluate(state, index).result is GateResult.VERIFICATION_FAILED
+
+    def test_a_waiver_does_not_excuse_broken_syntax(self, index, repo):
+        (repo / "src" / "shop" / "utils" / "pagination.py").write_text("def paginate(:\n  pass\n")
+        fresh = RepoIndex(repo).build()
+        state = state_for(
+            "Fix paginate. Do not run tests.", fresh, touched=["src/shop/utils/pagination.py"]
+        )
+        assert completion_gate.evaluate(state, fresh).result is GateResult.VERIFICATION_FAILED

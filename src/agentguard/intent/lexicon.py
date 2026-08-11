@@ -106,7 +106,10 @@ DOMAIN_KEYWORDS: dict[Domain, tuple[str, ...]] = {
         "horizontally scalable", "horizontal scaling", "load balanc",
     ),
     Domain.ML_ENGINEERING: (
-        "model", "training", "train", "inference", "prediction", "predict", "feature",
+        # "model" alone is ambiguous — `models.py`, "data model", "domain model" — so it
+        # is qualified. The unqualified word carries no ML signal on its own.
+        "ml model", "the model", "model training", "model version", "model registry",
+        "training", "train", "inference", "prediction", "predict", "feature",
         "dataset", "accuracy", "precision", "recall", "f1", "hyperparameter", "epoch",
         "pytorch", "tensorflow", "sklearn", "scikit", "embedding", "fine-tune",
     ),
@@ -150,7 +153,11 @@ DOMAIN_PATH_HINTS: dict[Domain, tuple[str, ...]] = {
     Domain.BACKEND: ("/api/", "/routes/", "/handlers/", "/controllers/", "/endpoints/", "/server/"),
     Domain.FRONTEND: ("/components/", "/pages/", "/views/", "/styles/", ".tsx", ".jsx", ".css", ".scss"),
     Domain.DATABASE: ("/migrations/", "/models/", "/schema", "/repositories/", ".sql"),
-    Domain.ML_ENGINEERING: ("/models/", "/training/", "/inference/", "/features/", ".ipynb"),
+    # Deliberately *not* "/models/". Found in Phase 6 live validation: adding a comment
+    # to a shop's `src/shop/models.py` was classified ml_engineering + mlops and told to
+    # verify with "evaluation metrics". In web applications `models.py` means ORM models
+    # far more often than machine-learning ones, so the hint is worse than no hint.
+    Domain.ML_ENGINEERING: ("/training/", "/inference/", "/features/", "/ml/", ".ipynb", ".pt", ".onnx"),
     Domain.DATA_PIPELINE: ("/pipelines/", "/dags/", "/etl/"),
     Domain.CLOUD: ("/terraform/", "/infra/", ".tf"),
     Domain.DOCKER: ("dockerfile", "docker-compose"),

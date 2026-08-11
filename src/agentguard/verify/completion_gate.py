@@ -100,7 +100,11 @@ def evaluate(
     if verification.all_passed:
         return GateVerdict(GateResult.PASS, "tests ran and passed")
 
-    # 3. Nothing was run. Only a problem if there was something to run.
+    # 3. Nothing was run. Only a problem if there was something to run *and* the
+    #    developer did not say not to.
+    if state.spec.tests_waived:
+        return GateVerdict(GateResult.PASS, "the request explicitly waived running tests")
+
     available = runners.detect_runners(index)
     if not available:
         return GateVerdict(GateResult.PASS, "no test runner in this project")

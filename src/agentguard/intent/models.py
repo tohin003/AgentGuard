@@ -106,6 +106,29 @@ class TaskSpec(BaseModel):
         return self.verbs[0] if self.verbs else "unknown"
 
     @property
+    def tests_waived(self) -> bool:
+        """Whether the developer explicitly said not to run tests.
+
+        Found in live validation (Phase 6): the Completion Gate demanded a test run on a
+        prompt that said "Do not run tests", and had no way to know. The agent diagnosed
+        it precisely — "the gate can't be satisfied, and I finish with the gate still
+        complaining" — which is the §39 failure mode exactly.
+
+        The waiver excuses *not running* tests. It does not excuse tests that ran and
+        failed, or code that no longer parses: those are still reported, because the
+        developer waived the work, not the truth.
+        """
+        text = self.prompt.lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "do not run test", "don't run test", "dont run test", "without running test",
+                "no need to run test", "skip the test", "skip tests", "don't test",
+                "do not run the test", "no tests", "without tests", "don't run the test",
+            )
+        )
+
+    @property
     def domains(self) -> list[Domain]:
         return [self.primary_domain, *self.secondary_domains]
 

@@ -3,9 +3,9 @@
 Living status. Updated at the end of every phase.
 Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered AI Agent Reliability & Reasoning Layer.md`
 
-**Current phase:** Phase 6 — First real-world validation (§50 milestone) — **your checkpoint**
+**Current phase:** Phase 6 ✅ — §50 milestone met. **Awaiting your sign-off to start Act II.**
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
-**Suite:** 359 tests passing · ruff clean
+**Suite:** 372 tests passing · ruff clean
 
 ---
 
@@ -20,7 +20,7 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | 3.5 | Storage foundation & data lifecycle | ✅ **done** | all met — see below |
 | 4 | Action Validator + Verification + Completion Gate | ✅ **done** | all met — see below |
 | 5 | Full Claude Code adapter + install UX | ✅ **done** | all met — see below |
-| 6 | 🔬 First real-world validation (§50 milestone) | ⬜ next | — |
+| 6 | 🔬 First real-world validation (§50 milestone) | ✅ **done** | met — `docs/VALIDATION-phase6.md` |
 | 7 | Act II — performance & reliability hardening | ⬜ blocked on Phase 6 sign-off | — |
 | 8 | Act II — agent interoperability (MCP, Cursor, Codex) | ⬜ blocked | — |
 | 9 | Act II — persistent project memory foundation | ⬜ blocked | — |
@@ -164,6 +164,35 @@ that cannot be revived is reported to the developer, who decides whether to cont
 |---|---|
 | `python -m agentguard.daemon run` defaulted to port **0** ("any free port") | The shim spawns it exactly that way. The daemon would bind a random port while the installed hook URL pointed at the configured one — **every hook failing, AgentGuard silently doing nothing in every real install.** Every test passed, because every test passed `--port` explicitly. |
 | The handshake was published *before* binding | A daemon that could not bind still advertised itself, and briefly looked alive |
+
+## Phase 6 — first real-world validation ✅
+
+Full write-up: **`docs/VALIDATION-phase6.md`**. Real `claude -p` sessions, real repository.
+
+| Scenario | Result |
+|---|---|
+| **Pass 0** — dead daemon | ✅ fail-open holds; hook failure reported, **non-blocking**; the edit landed |
+| S1 trivial rename | ✅ 1.0/100 direct, completely invisible |
+| S2 pagination (§33) | ✅ agent used the **existing** `paginate`, cited `page_metadata` / `count()`, no new abstraction |
+| S3 hallucinated method (§14, §21) | ✅ challenged in 17.9 ms with file evidence; agent defined the method and said it "did not previously exist" |
+| S4 production-ready (§34) | ✅ 75/100 DEEP, "do not compress it into a quick change" |
+| S5 false completion (§19) | ✅ gate blocked — observed **spontaneously**, before it was scripted |
+
+Live latency: typical decision **0.3–7 ms**, challenge **17.9 ms**, cold first call 129.7 ms.
+
+**Four defects found, all fixed.** Three had made an entire phase inert in production while
+its tests passed; the fourth was diagnosed by the agent under test.
+
+| Defect | Consequence |
+|---|---|
+| `prompt_text` → **`prompt`** | Intent Gateway saw an empty string on every real prompt — Phase 2 inert |
+| `tool_output` → **`tool_response`** (a dict) | Completion Gate never saw a test result — Phase 4's core mechanism never fired |
+| Gate nagged about tests the developer waived | §39 failure mode; **the agent diagnosed it**: "the gate can't be satisfied" |
+| `models.py` classified `ml_engineering` | Advised "evaluation metrics" for a one-line comment |
+
+**Still open:** `updatedInput` with `"defer"` (no live MODIFY occurred), and attribution —
+S2/S3 show the *system* working, not that AgentGuard caused it. Only the §36 benchmark with
+a control arm can separate those. Act II Phase 12.
 
 ## Spec conformance suite
 
@@ -309,6 +338,9 @@ Gate; `session_end` closes out and runs storage maintenance.
   nothing about them.
 - **Only *newly introduced* claims are checked.** Pre-existing problems in a file are never
   attributed to the edit that touched something else.
+- **Let the agent under test tell you what is wrong with the tool.** The most useful defect
+  of Phase 6 was diagnosed by the agent complaining, in its own words, that the gate could
+  not be satisfied.
 - **Documentation is a hypothesis; captured payloads are evidence.** Both field-name bugs
   were invisible to 348 passing tests, because every test fed the adapter payloads written
   from the same docs the adapter was written from. Tests now run against real captured
@@ -408,3 +440,7 @@ Gate; `session_end` closes out and runs storage maintenance.
   switch, and the two decisions taken with the user: MODIFY under an enforced narrowing
   invariant, and visible failure when the daemon cannot be revived. Found and fixed a
   port-default bug that would have silently disabled AgentGuard in every real install.
+- **Phase 6 complete — the §50 milestone is met.** 372 tests, ruff clean. Real agent, real
+  repository, evidence-grounded challenges resolved by the host's own intelligence, verified
+  completion, no LLM on AgentGuard's side. Four defects found and fixed; see
+  `docs/VALIDATION-phase6.md` including what is still unproven.

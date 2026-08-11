@@ -341,3 +341,43 @@ class TestTransparency:
     def test_raw_score_is_preserved_so_rule_effects_are_visible(self, index):
         spec = analyse("Make our inference service production-ready.", index)
         assert spec.complexity.raw_score < spec.complexity.score
+
+
+class TestDomainMisclassification:
+    """Found in Phase 6 live validation.
+
+    Adding a comment to a shop's `src/shop/models.py` was classified
+    `ml_engineering + mlops`, and the injected budget told the agent to verify with
+    "evaluation metrics, not only unit tests" — nonsense advice for a one-line comment,
+    and the kind of confident wrongness that costs a tool its credibility.
+
+    Two causes, both now fixed: a `/models/` path hint that means ORM models far more
+    often than ML ones, and the unqualified word "model" carrying ML signal.
+    """
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "Add a one-line comment to src/shop/models.py.",
+            "Add a field to the User model in models.py.",
+            "Rename the Order model.",
+        ],
+    )
+    def test_orm_models_are_not_machine_learning(self, index, prompt):
+        spec = analyse(prompt, index)
+        assert Domain.ML_ENGINEERING not in spec.domains, (
+            f"{prompt!r} -> {[d.value for d in spec.domains]}"
+        )
+        budget = render(spec, index) or ""
+        assert "evaluation metrics" not in budget
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "Retrain the model on the new dataset.",
+            "Reduce inference latency for the prediction endpoint.",
+            "The model version in the registry is stale.",
+        ],
+    )
+    def test_real_machine_learning_is_still_recognised(self, index, prompt):
+        assert Domain.ML_ENGINEERING in analyse(prompt, index).domains
