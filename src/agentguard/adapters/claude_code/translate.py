@@ -6,13 +6,19 @@ This module is the *only* place in the codebase that knows Claude Code's JSON sh
 
 A safety property worth stating explicitly
 ------------------------------------------
-**AgentGuard never returns ``permissionDecision: "allow"``.**
+**AgentGuard emits ``permissionDecision: "allow"`` in exactly one case: a MODIFY whose
+rewrite provably narrows the action.**
 
-"allow" in Claude Code short-circuits the user's own permission rules. A guard layer that
-silently granted permissions the developer had chosen to be asked about would make the
-system *less* safe, which is the exact opposite of the point. AgentGuard therefore only
-ever: stays silent (no decision — normal permission flow proceeds), objects ("deny" with a
-reason the host can reason about), or escalates to the human ("ask").
+"allow" short-circuits the developer's own permission rules, so a guard layer that used it
+freely would make the system *less* safe. Every other path therefore only ever: stays
+silent (no decision — the normal permission flow proceeds), objects ("deny" with a reason
+the host can reason about), or escalates to the human ("ask").
+
+The MODIFY exception was decided deliberately with the user: the rewrite is a narrowing of
+something the host already proposed, and genuinely risky actions are routed to "ask"
+instead of being rewritten. `validate.modify` enforces that a rewrite can only ever reduce
+reach and re-checks the result, so a bug in the rewriting logic cannot launder a dangerous
+command past a skipped prompt.
 
 Hook contract verified against https://code.claude.com/docs/en/hooks on 2026-08-11.
 """
@@ -26,6 +32,11 @@ from agentguard.core.events import AgentEvent
 from agentguard.core.models import Decision
 
 AGENT_NAME = "claude-code"
+
+# Tried as "defer" so the rewrite and the developer's permission prompt can coexist.
+# Phase 6 measures whether Claude Code honours `updatedInput` alongside "defer"; if it
+# does not, this becomes "allow" — the fallback the user authorised (plan D2).
+MODIFY_PERMISSION = "defer"
 
 # Claude Code hook event name -> normalized event type.
 EVENT_MAP: dict[str, EventType] = {
@@ -110,11 +121,17 @@ def _pre_tool_use_out(decision: Decision) -> dict[str, Any]:
         )
 
     if action is DecisionAction.MODIFY and decision.updated_arguments is not None:
-        # "defer" keeps the user's normal permission flow intact while still rewriting
-        # the arguments; the change is always announced rather than made silently.
+        # The one place AgentGuard emits "allow", and only under the narrowing invariant
+        # enforced in `validate.modify` (see IMPLEMENTATION_PLAN D2). The rewrite always
+        # announces itself; silently changing what the agent asked for is a trust hazard
+        # even when the change is an improvement.
+        #
+        # `MODIFY_PERMISSION` is "defer" first — if Claude Code honours `updatedInput`
+        # alongside it, we get the rewrite *and* the developer's permission prompt, which
+        # is strictly better. Phase 6 measures it; "allow" is the authorised fallback.
         return _spec_out(
             "PreToolUse",
-            permissionDecision="defer",
+            permissionDecision=MODIFY_PERMISSION,
             updatedInput=decision.updated_arguments,
             additionalContext=decision.additional_context or decision.reason or None,
         )

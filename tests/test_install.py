@@ -30,13 +30,26 @@ class TestHookConfig:
         assert installed <= set(SUBSCRIBED_EVENTS)
         assert {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"} <= installed
 
-    def test_hot_path_uses_http_not_subprocess(self):
-        """SPEC §8: a Python process spawn per tool call would eat the whole budget."""
+    def test_per_tool_call_hooks_never_spawn_a_process(self):
+        """SPEC §8: a Python process spawn per tool call would eat the whole budget.
+
+        Per-*prompt* hooks are a different matter — they fire orders of magnitude less
+        often, which is why the health check can afford to be a command hook.
+        """
         config = inst.build_hook_config()
-        for event in ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop"):
+        for event in ("PreToolUse", "PostToolUse", "Stop"):
             for group in config[event]:
                 for hook in group["hooks"]:
                     assert hook["type"] == "http", f"{event} must not spawn a process"
+
+    def test_the_health_check_runs_once_per_prompt(self):
+        """Plan D9: a dead AgentGuard has to be able to say so, and only a process of
+        ours can speak when the daemon is gone."""
+        hooks = inst.build_hook_config()["UserPromptSubmit"][0]["hooks"]
+        command_hooks = [h for h in hooks if h["type"] == "command"]
+        assert len(command_hooks) == 1
+        assert "--health" in command_hooks[0]["args"]
+        assert any(h["type"] == "http" for h in hooks), "the decision path stays on http"
 
     def test_session_start_warms_the_daemon(self):
         hook = inst.build_hook_config()["SessionStart"][0]["hooks"][0]

@@ -3,9 +3,9 @@
 Living status. Updated at the end of every phase.
 Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered AI Agent Reliability & Reasoning Layer.md`
 
-**Current phase:** Phase 5 — Full Claude Code adapter + install UX (next)
+**Current phase:** Phase 6 — First real-world validation (§50 milestone) — **your checkpoint**
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
-**Suite:** 328 tests passing · ruff clean
+**Suite:** 348 tests passing · ruff clean
 
 ---
 
@@ -19,8 +19,8 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | 3 | Evidence Engine + Contradiction Engine | ✅ **done** | all met — see below |
 | 3.5 | Storage foundation & data lifecycle | ✅ **done** | all met — see below |
 | 4 | Action Validator + Verification + Completion Gate | ✅ **done** | all met — see below |
-| 5 | Full Claude Code adapter + install UX | ⬜ next | — |
-| 6 | 🔬 First real-world validation (§50 milestone) | ⬜ not started | — |
+| 5 | Full Claude Code adapter + install UX | ✅ **done** | all met — see below |
+| 6 | 🔬 First real-world validation (§50 milestone) | ⬜ next | — |
 | 7 | Act II — performance & reliability hardening | ⬜ blocked on Phase 6 sign-off | — |
 | 8 | Act II — agent interoperability (MCP, Cursor, Codex) | ⬜ blocked | — |
 | 9 | Act II — persistent project memory foundation | ⬜ blocked | — |
@@ -140,6 +140,31 @@ repeating myself" and suppresses everything — meaning **every challenge in the
 pipeline was being silently dropped**. Phase 3's tests called `evidence.check()` directly
 and passed throughout. Only an end-to-end test through the Guard exposed it.
 
+## Phase 5 — exit criteria
+
+| Criterion | Result |
+|---|---|
+| All six hooks wired, installed safely | ✅ verified by installing into a real scratch project |
+| Detach leaves your own hooks untouched | ✅ idempotent install, exact uninstall, `--dry-run` |
+| Kill switch | ✅ `agentguard off` / `on`, plus `AGENTGUARD_DISABLE=1` per session |
+| Transparency | ✅ `log`, `why`, `doctor`, `db stats \| projects \| maintain` |
+| **MODIFY under a narrowing invariant** (plan D2) | ✅ rewrite-first, re-checked, always announced |
+| **A dead AgentGuard says so** (plan D9) | ✅ revive → silent; unrecoverable → visible message, exit 1, blocks nothing |
+
+**Two user decisions implemented.** `MODIFY` may now emit `"allow"`, which skips the
+developer's permission prompt for that call — justified only because the rewrite is a
+*narrowing*, so the code proves it: a rewrite may never extend reach, its output is
+re-checked by the risk checks, and it always announces itself. Anything that cannot be made
+safe falls through to `REQUEST_REVIEW` instead. And fail-open is no longer silent: a daemon
+that cannot be revived is reported to the developer, who decides whether to continue.
+
+**Two bugs found, one serious.**
+
+| Bug | Consequence |
+|---|---|
+| `python -m agentguard.daemon run` defaulted to port **0** ("any free port") | The shim spawns it exactly that way. The daemon would bind a random port while the installed hook URL pointed at the configured one — **every hook failing, AgentGuard silently doing nothing in every real install.** Every test passed, because every test passed `--port` explicitly. |
+| The handshake was published *before* binding | A daemon that could not bind still advertised itself, and briefly looked alive |
+
 ## Spec conformance suite
 
 Acceptance tests derived from the SPEC's own worked examples. These are the real
@@ -173,7 +198,7 @@ src/agentguard/
 ├── adapters/claude_code/
 │   ├── translate.py  Claude JSON ⇄ AgentEvent ⇄ hook output
 │   ├── install.py    safe settings.json merge / uninstall
-│   └── shim.py       stdlib-only fallback + --ensure-daemon
+│   └── shim.py       stdlib-only fallback, --ensure-daemon, --health
 ├── repo/             ── the deterministic evidence base (§32) ──
 │   ├── models.py     FileRecord, SymbolRecord, ImportRecord, GitState, DependencyInfo
 │   ├── scanner.py    gitignore-aware discovery (git ls-files fast path + walk fallback)
@@ -203,6 +228,7 @@ src/agentguard/
 │   └── ledger.py     rationing — once per concern, hard ceiling per task
 ├── validate/         ── Action Validator (§18) ──
 │   ├── checks.py     scope creep, proportionality, risky commands, consistency
+│   ├── modify.py     narrowing rewrites, and the invariant that keeps them safe
 │   └── validator.py  the cost-ordered pipeline and its decisions
 ├── verify/           ── Verification + Completion Gate (§19, §20) ──
 │   ├── runners.py    runner detection, test-command recognition, output parsing
@@ -272,6 +298,11 @@ Gate; `session_end` closes out and runs storage maintenance.
   nothing about them.
 - **Only *newly introduced* claims are checked.** Pre-existing problems in a file are never
   attributed to the edit that touched something else.
+- **A safety layer must not fail silently.** A developer who believes they are guarded and
+  is not is worse off than one who knows. Fail-open stays; being quiet about it does not.
+- **Defaults that only tests override are untested defaults.** The daemon's port default
+  was wrong in a way that would have disabled AgentGuard in every real install, and every
+  test passed because every test supplied the value explicitly.
 - **Read the agent's test output rather than running tests.** The output is ground truth
   and arrives free in `PostToolUse`. Running a second suite concurrently invites conflicts
   over ports, fixtures and temp files, and is slow on a path meant to be invisible.
@@ -358,3 +389,7 @@ Gate; `session_end` closes out and runs storage maintenance.
   static syntax checks) and the Completion Gate. A turn that claims passing tests it did
   not earn is now blocked with the agent's own output as evidence. Found and fixed a bug
   that had been suppressing every challenge in the real pipeline.
+- **Phase 5 complete.** 348 tests, ruff clean. Full adapter, install/uninstall UX, kill
+  switch, and the two decisions taken with the user: MODIFY under an enforced narrowing
+  invariant, and visible failure when the daemon cannot be revived. Found and fixed a
+  port-default bug that would have silently disabled AgentGuard in every real install.

@@ -34,6 +34,7 @@ MUTATING_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
 # developer hostage, and the fail-open path is cheap.
 TIMEOUTS = {
     "SessionStart": 20,
+    "Health": 12,
     "UserPromptSubmit": 10,
     "PreToolUse": 5,
     "PostToolUse": 5,
@@ -88,7 +89,21 @@ def build_hook_config(settings: Settings | None = None, python_exe: str | None =
             }
         ],
         "UserPromptSubmit": [
-            {"hooks": [_http_hook(url, token, TIMEOUTS["UserPromptSubmit"])]}
+            {
+                "hooks": [
+                    # Health check first: detect a dead daemon, try once to revive it,
+                    # and tell the developer if it cannot be. Silent fail-open would
+                    # leave them believing they are guarded when they are not.
+                    # Once per prompt, not per tool call, so the cost is invisible.
+                    {
+                        "type": "command",
+                        "command": py,
+                        "args": ["-m", "agentguard.adapters.claude_code.shim", "--health"],
+                        "timeout": TIMEOUTS["Health"],
+                    },
+                    _http_hook(url, token, TIMEOUTS["UserPromptSubmit"]),
+                ]
+            }
         ],
         "PreToolUse": [
             {"matcher": MUTATING_MATCHER, "hooks": [_http_hook(url, token, TIMEOUTS["PreToolUse"])]}

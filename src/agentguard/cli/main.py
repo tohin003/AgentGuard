@@ -434,6 +434,42 @@ def explain_cmd(
         _warn("covered by    no tests found")
 
 
+# ---------------------------------------------------------------- kill switch
+
+
+def _set_enabled(enabled: bool) -> Path:
+    """Persist the on/off flag without disturbing the rest of the config."""
+    path = agentguard_home() / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    kept = [ln for ln in lines if not ln.strip().startswith("enabled")]
+    body = "\n".join([f"enabled = {'true' if enabled else 'false'}", *kept]).strip() + "\n"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+@app.command("off")
+def off_cmd() -> None:
+    """Stop guarding, without uninstalling anything.
+
+    The hooks stay in place and keep firing; they simply decide nothing. Useful when
+    AgentGuard is in the way and you want it back later without re-installing.
+    """
+    path = _set_enabled(False)
+    _ok(f"AgentGuard is OFF ({path})")
+    _echo("  hooks remain installed and inert · re-enable with `agentguard on`")
+    _echo("  for a single session instead, set AGENTGUARD_DISABLE=1")
+
+
+@app.command("on")
+def on_cmd() -> None:
+    """Resume guarding."""
+    _set_enabled(True)
+    _ok("AgentGuard is ON")
+    if not Settings.load().enabled:
+        _warn("still disabled by AGENTGUARD_DISABLE in this environment")
+
+
 # ---------------------------------------------------------------- storage
 
 

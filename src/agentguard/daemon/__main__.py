@@ -10,8 +10,12 @@ def main() -> int:
     if args and args[0] == "run":
         from agentguard.daemon.app import run
 
-        host = "127.0.0.1"
-        port = 0
+        # None, not 0. `run()` reads `port=0` as "pick any free port", which would bind
+        # somewhere random while the installed hook URL still pointed at the configured
+        # port — every hook failing, AgentGuard silently doing nothing. The shim spawns
+        # this without `--port`, so the default has to mean "use the configuration".
+        host: str | None = None
+        port: int | None = None
         for i, a in enumerate(args):
             if a == "--host" and i + 1 < len(args):
                 host = args[i + 1]

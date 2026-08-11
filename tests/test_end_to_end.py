@@ -57,7 +57,13 @@ def installed(tmp_path, isolated_home):
 
 
 def hook_for(config: dict, event: str) -> dict:
-    return config["hooks"][event][0]["hooks"][0]
+    """The http (decision) hook for an event.
+
+    `UserPromptSubmit` also carries a command-type health check, which is not the hook
+    that carries decisions.
+    """
+    hooks = config["hooks"][event][0]["hooks"]
+    return next(h for h in hooks if h["type"] == "http")
 
 
 def fire(hook: dict, payload: dict) -> httpx.Response:
@@ -145,6 +151,62 @@ class TestInstalledWiring:
         p95 = samples[int(len(samples) * 0.95) - 1]
         print(f"\n  installed hot path p50={samples[len(samples)//2]:.2f}ms p95={p95:.2f}ms")
         assert p95 < 100.0
+
+
+class TestTheDaemonBindsWhereTheHooksPoint:
+    """The installed hook URL and the daemon's actual port must agree.
+
+    They did not. `python -m agentguard.daemon run` — exactly how the shim spawns it —
+    defaulted to port 0, meaning "any free port", while the installed URL pointed at the
+    configured one. Every hook would have failed and AgentGuard would have silently done
+    nothing in every real installation. Every test passed, because every test passed
+    `--port` explicitly and so never exercised the default.
+    """
+
+    def test_the_spawned_daemon_uses_the_configured_port(self, isolated_home):
+        port = free_port()
+        (isolated_home / "config.toml").write_text(f"[daemon]\nport = {port}\n")
+
+        env = dict(os.environ, AGENTGUARD_HOME=str(isolated_home), PYTHONPATH=str(REPO_ROOT / "src"))
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "agentguard.daemon", "run"],  # no --port, like the shim
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.time() + 20
+            handshake = None
+            while time.time() < deadline:
+                path = isolated_home / "daemon.json"
+                if path.exists():
+                    handshake = json.loads(path.read_text())
+                    break
+                time.sleep(0.05)
+
+            assert handshake is not None, "the daemon never published a handshake"
+            assert handshake["port"] == port, (
+                f"daemon bound {handshake['port']} but the hooks point at {port}"
+            )
+            assert httpx.get(f"http://127.0.0.1:{port}/health", timeout=5).status_code == 200
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_an_unavailable_port_fails_loudly_instead_of_pretending(self, isolated_home):
+        """Publishing the handshake before binding meant a daemon that could not start
+        still advertised itself, and briefly looked alive."""
+        (isolated_home / "config.toml").write_text("[daemon]\nport = 1\n")  # privileged
+        env = dict(os.environ, AGENTGUARD_HOME=str(isolated_home), PYTHONPATH=str(REPO_ROOT / "src"))
+        result = subprocess.run(
+            [sys.executable, "-m", "agentguard.daemon", "run"],
+            env=env,
+            capture_output=True,
+            timeout=30,
+        )
+        assert result.returncode != 0
+        assert not (isolated_home / "daemon.json").exists(), "a daemon that cannot bind must not advertise"
+        assert b"cannot bind" in result.stderr
 
 
 class TestFailOpenInProduction:

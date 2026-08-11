@@ -74,13 +74,58 @@ a localhost round trip (~1–3ms) plus our compute. A `command` hook, by contras
 
 Phase 0 measures both and records real numbers before anything is built on top.
 
-### D2 — `MODIFY` is real
+### D2 — `MODIFY` is real, and may only ever narrow  *(decided with the user, 2026-08-11)*
 
 `PreToolUse` accepts `updatedInput`, which rewrites tool arguments before execution. §18
-lists `MODIFY` as a decision and this makes it implementable rather than aspirational (e.g.
-narrowing a `Bash` command, stripping an unrelated file from a multi-file edit). Used
-sparingly — silently changing what the agent asked for is a trust hazard, so `MODIFY` is
-reserved for provably-safe narrowing and always reports itself via `additionalContext`.
+lists `MODIFY` as a decision and this makes it implementable rather than aspirational.
+
+The open question was whether emitting `updatedInput` requires `permissionDecision:
+"allow"`, which bypasses the developer's own permission rules. **The user's decision:
+allow it.** Their reasoning: the rewrite is a *narrowing* of something the host LLM already
+proposed and would have run in auto mode, and genuinely risky actions are handled by a
+different decision (`REQUEST_REVIEW` → `"ask"`) rather than by rewriting.
+
+That reasoning holds *because the rewrite is a narrowing*, so the implementation makes
+that a property the code enforces rather than an assumption:
+
+1. **A rewrite may only reduce reach, never extend it.** Narrowing a path, dropping a
+   flag, removing a file from a multi-file edit. Anything that could touch more than the
+   original is not a `MODIFY`.
+2. **The rewritten arguments are re-checked.** If the rewrite itself trips a risk check,
+   the decision escalates to `REQUEST_REVIEW` instead. A bug in the rewriting logic must
+   not be able to launder a dangerous command through a bypassed prompt.
+3. **It always announces itself** via `additionalContext`. Silently changing what the
+   agent asked for is a trust hazard even when the change is an improvement.
+4. **`"defer"` is tried first.** If Claude Code honours `updatedInput` alongside `"defer"`,
+   we get the rewrite *and* the developer's permission flow, which is strictly better.
+   Phase 6 settles it; `"allow"` is the fallback the user has authorised.
+
+Risk accepted knowingly: for the specific call being rewritten, the developer's permission
+prompt is skipped. Invariants 1–3 bound what can be done with that.
+
+### D9 — A dead AgentGuard tells you it is dead  *(decided with the user, 2026-08-11)*
+
+Fail-open was previously *silent*: daemon dies, hooks fail, the agent carries on, nobody
+knows. The user identified the flaw — **silent failure of a safety layer is worse than
+visible failure, because you believe you are protected when you are not.**
+
+Required behaviour: detect, re-verify, tell the developer, and let them choose whether to
+continue unguarded.
+
+Implementation (Phase 5):
+
+* `UserPromptSubmit` gains a second, `command`-type hook that health-checks the daemon and
+  attempts **one revival**. Once per prompt, not per tool call, so the ~60 ms is invisible.
+* Revived or healthy → exit 0, silent. Nothing changes.
+* Unrecoverable → write to stderr and exit non-zero-non-2. Claude Code surfaces the first
+  stderr line in the transcript as a hook error, and treats it as **non-blocking** — so the
+  developer sees it and the work proceeds. That is exactly "notify, do not block, user
+  decides".
+* Announced **once per session**, not per prompt. A warning repeated every turn is the
+  nagging SPEC §39 forbids, even when the warning is true.
+* The message has to be actionable: how to restart, and how to detach.
+
+Fail-open is unchanged as a mechanism. What changes is that it is no longer quiet about it.
 
 ### D3 — Hook → SPEC component mapping
 
@@ -406,8 +451,16 @@ behaves normally with AgentGuard invisible.
 > intelligence, allow valid actions, block/redirect invalid actions, and verify the final
 > implementation — all without AgentGuard owning an LLM.
 
-**Method** — a scratch repository (I will propose candidates when we get here) and a scripted
-set of real tasks run through a live Claude Code session with AgentGuard attached:
+**Method** — real `claude -p` sessions with AgentGuard installed, in two passes.
+
+**Pass 0 — the assumption that has to hold first.** Install the hooks, kill the daemon
+mid-session, ask the agent to edit a file. If a failed `http` hook is *not* a non-blocking
+error, AgentGuard crashing breaks the developer's agent, and the architecture has to change
+before anything else is worth measuring. Run before the scenarios, not after.
+
+**Pass A — scripted scenarios** on a purpose-built scratch repository, seeded so each
+scenario has exactly the conditions it needs (a pagination utility that already exists, a
+class *without* the method the agent will reach for, a runnable test suite):
 1. **Trivial task** (rename) → expect: invisible, no challenge, tiny planning budget.
 2. **Grounded task** (§33 pagination) → expect: over-engineering challenged, revised plan
    allowed, completion verified.
@@ -415,6 +468,12 @@ set of real tasks run through a live Claude Code session with AgentGuard attache
    with file evidence, host self-corrects.
 4. **Complex task** (§34 production-readiness) → expect: DEEP depth, *no* simplicity pressure.
 5. **False-completion bait** → expect: Stop blocked with an accurate reason.
+
+**Pass B — realism check** on a *copy* of Origin V1 (cloned to a temp directory; nothing of
+the user's is at risk), with ordinary prompts rather than scripted ones. Pass A cannot
+surprise me — it is seeded to conditions I chose. Phase 3 already demonstrated the danger
+there: a hand-written corpus passed 26/26 while real code showed a 2.2% false-positive
+rate. Pass B is where "is it actually invisible during normal work" gets answered.
 
 **Evidence captured** — full decision log, latency distribution, challenge/allow counts,
 before/after transcripts, and an honest write-up in `docs/VALIDATION-phase6.md` including

@@ -150,6 +150,22 @@ _DANGEROUS: tuple[tuple[re.Pattern[str], str, str], ...] = (
 )
 
 
+def _is_guarded(command: str, match: re.Match[str]) -> bool:
+    """Whether a variable-expansion delete has already been made safe.
+
+    `[ -n "$OUT" ] && rm -rf "$OUT"` is the recommended form: it refuses to run rather
+    than expanding to `/`. Flagging it would be a false positive on correct code, and
+    would also stop MODIFY from ever being able to fix the unguarded version.
+    """
+    variables = re.findall(r"\$\{?(\w+)\}?", match.group(0))
+    if not variables:
+        return False
+    return all(
+        re.search(rf"\[\s*-[nz]\s+\"?\$\{{?{re.escape(name)}\}}?\"?\s*\]", command)
+        for name in variables
+    )
+
+
 def risky_command(event: AgentEvent) -> list[Finding]:
     """Commands worth a human's attention before they run.
 
@@ -167,6 +183,8 @@ def risky_command(event: AgentEvent) -> list[Finding]:
     for pattern, description, severity in _DANGEROUS:
         match = pattern.search(command)
         if not match:
+            continue
+        if "$" in match.group(0) and _is_guarded(command, match):
             continue
         findings.append(
             Finding(

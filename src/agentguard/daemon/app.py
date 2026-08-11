@@ -19,6 +19,7 @@ import logging
 import os
 import secrets
 import signal
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -181,6 +182,21 @@ def run(host: str | None = None, port: int | None = None, log_level: str = "warn
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind((host, 0))
             port = s.getsockname()[1]
+    else:
+        # Confirm the port is actually available *before* publishing the handshake.
+        # Publishing first meant a daemon that could not bind still advertised itself,
+        # and for the moment before it died, clients saw a live pid and a port that
+        # refused connections — a failure that looked like success.
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, port))
+        except OSError as exc:
+            sys.stderr.write(
+                f"agentguard: cannot bind {host}:{port} ({exc}). "
+                "Change [daemon].port in config.toml and re-run `agentguard install claude`.\n"
+            )
+            raise SystemExit(1) from exc
 
     app = create_app(token, settings)
     write_handshake(host, port, token)

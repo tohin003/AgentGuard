@@ -31,7 +31,7 @@ from agentguard.core.events import AgentEvent
 from agentguard.core.models import Decision, Finding
 from agentguard.core.taskstate import TaskState
 from agentguard.repo.index import RepoIndex
-from agentguard.validate import checks
+from agentguard.validate import checks, modify
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +48,24 @@ def validate(
     level = EscalationLevel.DETERMINISTIC
 
     # -- Level 0: the action's own arguments, no repository access ----------------
+    #
+    # Rewriting comes first, deliberately. A safe narrowing *fixes* the problem, where an
+    # objection only describes it — so when a dangerous command has a provably-narrower
+    # form, taking it is better than interrupting anyone. `modify.propose` re-checks its
+    # own output, so anything it cannot make safe falls straight through to the risk
+    # checks below and is escalated instead.
+    rewrite = modify.propose(event)
+    if rewrite is not None:
+        finding = modify.finding_for(rewrite, event)
+        return Decision(
+            action=DecisionAction.MODIFY,
+            level=EscalationLevel.DETERMINISTIC,
+            updated_arguments=rewrite.arguments,
+            additional_context=f"{finding.summary}. {finding.detail}",
+            reason=finding.summary,
+            findings=[finding],
+        )
+
     findings.extend(checks.risky_command(event))
 
     # A command needing human sign-off is decided here; nothing further is relevant.

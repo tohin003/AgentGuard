@@ -27,6 +27,21 @@ DEFAULT_TIMEOUT_S = 2.0
 DAEMON_START_TIMEOUT_S = 8.0
 
 
+def _start_timeout() -> float:
+    """How long to wait for a revived daemon.
+
+    Configurable because the right answer differs by machine: a cold start on a slow
+    filesystem takes longer than the default, and a developer who would rather fail fast
+    than wait can say so.
+    """
+    raw = os.environ.get("AGENTGUARD_START_TIMEOUT", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return DAEMON_START_TIMEOUT_S
+    return value if value > 0 else DAEMON_START_TIMEOUT_S
+
+
 def _home() -> str:
     return os.path.expanduser(os.environ.get("AGENTGUARD_HOME") or "~/.agentguard")
 
@@ -79,9 +94,11 @@ def _post(hs: dict, payload: dict, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
         conn.close()
 
 
-def ensure_daemon(timeout: float = DAEMON_START_TIMEOUT_S) -> dict | None:
+def ensure_daemon(timeout: float | None = None) -> dict | None:
     """Start the daemon if it is not already running. Returns the handshake, or None."""
     import time
+
+    timeout = _start_timeout() if timeout is None else timeout
 
     hs = _handshake()
     if _alive(hs):
@@ -116,6 +133,56 @@ def ensure_daemon(timeout: float = DAEMON_START_TIMEOUT_S) -> dict | None:
     return None
 
 
+HEALTH_NOTICE = (
+    "AgentGuard is not running — this session is UNGUARDED. "
+    "Restart it with `agentguard daemon start`, or detach with "
+    "`agentguard uninstall claude`. Your work continues either way."
+)
+
+
+def _notice_marker(session_id: str) -> str:
+    safe = "".join(c for c in (session_id or "unknown") if c.isalnum() or c in "-_")[:64]
+    return os.path.join(_home(), f"notified-{safe}")
+
+
+def _already_notified(session_id: str) -> bool:
+    """Warn once per session.
+
+    A true warning repeated on every prompt is still nagging, and nagging is what gets
+    AgentGuard uninstalled (SPEC §39).
+    """
+    marker = _notice_marker(session_id)
+    if os.path.exists(marker):
+        return True
+    try:
+        os.makedirs(_home(), exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+    except OSError:
+        pass
+    return False
+
+
+def health_check(payload: dict) -> int:
+    """Detect, re-verify, and tell the developer if AgentGuard is down.
+
+    Silent fail-open is worse than visible fail-open: a developer who believes they are
+    guarded, and is not, is in a worse position than one who knows. So this attempts one
+    revival and, if that fails, writes to stderr and exits non-zero-non-2 — which Claude
+    Code surfaces in the transcript as a hook error and treats as **non-blocking**.
+
+    The developer sees it. The work continues. Whether to carry on unguarded is their call.
+    """
+    if _alive(ensure_daemon()):
+        return 0
+
+    if _already_notified(payload.get("session_id", "")):
+        return 0
+
+    sys.stderr.write(HEALTH_NOTICE + "\n")
+    return 1  # non-zero, non-2: reported to the developer, blocks nothing
+
+
 def main() -> int:
     args = set(sys.argv[1:])
     try:
@@ -128,7 +195,10 @@ def main() -> int:
         return 0
 
     if os.environ.get("AGENTGUARD_DISABLE", "").strip().lower() in {"1", "true", "yes", "on"}:
-        return 0
+        return 0  # deliberately off: say nothing
+
+    if "--health" in args:
+        return health_check(payload)
 
     hs = ensure_daemon() if "--ensure-daemon" in args else _handshake()
     if not _alive(hs):
