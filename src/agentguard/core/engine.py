@@ -18,16 +18,24 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from agentguard import challenge, complexity, evidence, intent, planning
+from agentguard import complexity, intent, planning, validate
 from agentguard.challenge.ledger import ChallengeLedger
 from agentguard.core.config import Settings
 from agentguard.core.enums import DecisionAction, EscalationLevel, EventType
 from agentguard.core.events import AgentEvent
-from agentguard.core.metrics import M_DECISION, M_HOOK_LATENCY, METRICS, Timer
+from agentguard.core.metrics import (
+    M_DECISION,
+    M_FALSE_COMPLETION_BLOCKED,
+    M_HOOK_LATENCY,
+    METRICS,
+    Timer,
+)
 from agentguard.core.models import Decision
 from agentguard.core.store import ProjectStore
+from agentguard.core.taskstate import TaskState
 from agentguard.intent.models import TaskSpec
 from agentguard.repo.index import RepoIndex
+from agentguard.verify import completion_gate, runners
 
 log = logging.getLogger(__name__)
 
@@ -46,10 +54,36 @@ class Workspace:
         # resolves to ALLOW (SPEC §39).
         self.index = RepoIndex(root, settings.index)
         self.index.build_async()
-        # The TaskSpec for the prompt currently being worked on. Phase 4 checks
-        # proposed actions against it (scope, expected verification).
+        # The TaskSpec for the prompt currently being worked on.
         self.current_spec: TaskSpec | None = None
         self.ledger = ChallengeLedger(self.store, settings.challenge)
+        # Live task state: files touched, tests observed, gate budget. In memory only —
+        # a lost task means the next action is judged without history, which is ALLOW.
+        self._tasks: dict[str, TaskState] = {}
+        self._latest_task_id: str | None = None
+
+    def begin_task(self, task_id: str, spec: TaskSpec) -> TaskState:
+        state = TaskState(task_id=task_id, spec=spec)
+        self._tasks[task_id] = state
+        self._latest_task_id = task_id
+        # One prompt at a time; older tasks are only kept for late-arriving events.
+        if len(self._tasks) > 8:
+            for stale in list(self._tasks)[:-8]:
+                self._tasks.pop(stale, None)
+        return state
+
+    def resolve_task_id(self, session_id: str) -> str | None:
+        """The task a tool event belongs to. In-memory first; the store is the fallback
+        after a daemon restart."""
+        return self._latest_task_id or self.store.current_task_id(session_id)
+
+    def task_state(self, task_id: str | None) -> TaskState | None:
+        if task_id and task_id in self._tasks:
+            return self._tasks[task_id]
+        # Tool events can arrive before the store has attributed them to a task.
+        if self._latest_task_id:
+            return self._tasks.get(self._latest_task_id)
+        return None
 
     def close(self) -> None:
         self.store.close()
@@ -100,6 +134,10 @@ class Guard:
         with Timer() as t:
             try:
                 ws = self.workspace(event.workspace)
+                # Resolve the task *before* dispatching. Handlers need it: without a task
+                # id the challenge ledger has no way to avoid repeating itself, so it
+                # suppresses everything — which silently disabled every challenge.
+                event.task_id = event.task_id or ws.resolve_task_id(event.session_id)
                 handler = self._handlers.get(event.event)
                 decision = handler(event, ws) if handler else Decision.allow()
             except Exception:
@@ -113,7 +151,6 @@ class Guard:
 
         if ws is not None:
             try:
-                event.task_id = event.task_id or ws.store.current_task_id(event.session_id)
                 ws.store.record_event(event)
                 decision.decision_id = ws.store.record_decision(event, decision) or decision.decision_id
                 # Latency lives in the in-memory collector only. Persisting it here would
@@ -125,11 +162,12 @@ class Guard:
 
     # -- handlers -----------------------------------------------------------------
     #
-    # Phase 0 wires the skeleton; each handler is filled in by a later phase:
-    #   user_prompt   -> Phase 2 (Intent Gateway, Complexity, Planning Governor)
-    #   pre_tool_use  -> Phase 3 + 4 (Evidence Engine, Action Validator)
-    #   post_tool_use -> Phase 4 (scope ledger, async verification)
-    #   stop          -> Phase 4 (Completion Gate)
+    #   session_start -> warm the index
+    #   user_prompt   -> Intent Gateway, Complexity Engine, Planning Governor (§9-§13)
+    #   pre_tool_use  -> Action Validator: evidence, scope, risk (§14-§18)
+    #   post_tool_use -> observe what happened: files touched, tests run (§19)
+    #   stop          -> Completion Gate (§19, §20)
+    #   session_end   -> close out and run storage maintenance
 
     def _on_session_start(self, event: AgentEvent, ws: Workspace) -> Decision:
         ws.store.open_session(event.session_id, event.agent, str(ws.root))
@@ -161,6 +199,7 @@ class Guard:
             depth=str(spec.complexity.depth),
         )
         event.task_id = task_id
+        ws.begin_task(task_id, spec)
 
         budget = planning.render(spec, index)
         if not budget:
@@ -173,51 +212,99 @@ class Guard:
         )
 
     def _on_pre_tool_use(self, event: AgentEvent, ws: Workspace) -> Decision:
-        """Evidence Engine + Contradiction Engine (SPEC §14-§17)."""
+        """Action Validator (SPEC §18), which runs the Evidence Engine inside it."""
         # SPEC §7/§8: read-only tools never leave Level 0. This short-circuit is what
         # keeps ordinary exploration free.
         if event.is_read_only:
             return Decision.allow()
-        if not ws.index.is_built:
-            return Decision.allow()  # nothing known yet, so nothing to contradict
 
-        findings = evidence.check(event, ws.index)
-        if not findings:
-            return Decision.allow(EscalationLevel.REPOSITORY)
-
-        verdict = ws.ledger.admit(event.task_id, findings)
-        if not verdict.should_challenge:
-            # Recorded for `agentguard log`, but the host is not interrupted. Either it
-            # has already heard this, or the task's challenge budget is spent (SPEC §39).
-            return Decision(
-                action=DecisionAction.ALLOW,
-                level=EscalationLevel.REPOSITORY,
-                findings=findings,
-                reason=verdict.reason,
-            )
-
-        ws.ledger.record(event.task_id, verdict.raise_now)
-        return Decision(
-            action=DecisionAction.CHALLENGE,
-            level=EscalationLevel.HOST_CHALLENGE,
-            reason=challenge.render(verdict.raise_now),
-            findings=findings,
+        return validate.validate(
+            event=event,
+            index=ws.index,
+            state=ws.task_state(event.task_id),
+            ledger=ws.ledger,
+            task_id=event.task_id,
         )
 
     def _on_post_tool_use(self, event: AgentEvent, ws: Workspace) -> Decision:
-        # Keep the evidence base honest: re-parse exactly the file that just changed
-        # (~1ms) rather than re-statting the whole tree (~100ms on a large repo).
-        if ws.index.is_built:
-            changed = event.arg("file_path") or event.arg("notebook_path")
-            if isinstance(changed, str) and changed:
-                ws.index.refresh_path(changed)
-            elif event.tool == "Bash":
-                # A shell command can touch anything; fall back to a rate-limited sweep.
+        """Observe what actually happened (SPEC §19).
+
+        Two jobs: keep the evidence base honest, and record what the Completion Gate will
+        need — which files changed, and what the agent's own test runs reported.
+        """
+        state = ws.task_state(event.task_id)
+
+        changed = event.arg("file_path") or event.arg("notebook_path")
+        if isinstance(changed, str) and changed:
+            path = ws.index.normalize(changed)
+            if state is not None:
+                state.touch(path)
+            # Re-parse exactly the file that changed (~1ms) rather than re-statting the
+            # whole tree (~100ms on a large repo).
+            if ws.index.is_built:
+                ws.index.refresh_path(path)
+
+        elif event.tool == "Bash":
+            command = event.arg("command")
+            if isinstance(command, str) and runners.is_test_command(command):
+                self._record_test_run(event, ws, state, command)
+            # A shell command can touch anything; fall back to a rate-limited sweep.
+            if ws.index.is_built:
                 ws.index.refresh(min_interval=2.0)
+
         return Decision.allow()
 
+    @staticmethod
+    def _record_test_run(
+        event: AgentEvent, ws: Workspace, state: TaskState | None, command: str
+    ) -> None:
+        """Read the agent's own test output.
+
+        This is what lets the Completion Gate contradict "all tests pass" without running
+        anything itself: the agent produced the evidence.
+        """
+        if state is None:
+            return
+        state.verification.commands_seen.append(command.strip()[:200])
+
+        output = event.result
+        if not isinstance(output, str):
+            output = "" if output is None else str(output)
+        outcome = runners.parse_output(command, output)
+        if outcome.passed is not None:
+            state.verification.outcomes.append(outcome)
+            ws.store.finish_verification(
+                ws.store.start_verification(state.task_id, outcome.runner),
+                "passed" if outcome.passed else "failed",
+                {"command": outcome.command, "summary": outcome.summary, "failed": outcome.failed},
+            )
+
     def _on_stop(self, event: AgentEvent, ws: Workspace) -> Decision:
-        return Decision.allow()
+        """Completion Gate (SPEC §19).
+
+        "Done" is a claim like any other. Blocking Stop hands the turn back to the agent
+        with the reason, so it keeps working rather than finishing on an unverified claim.
+        """
+        state = ws.task_state(event.task_id)
+        if state is None or not ws.index.is_built:
+            return Decision.allow()
+
+        verdict = completion_gate.evaluate(
+            state=state,
+            index=ws.index,
+            stop_hook_active=bool(event.raw.get("stop_hook_active")),
+            max_blocks=self.settings.challenge.max_stop_blocks_per_task,
+        )
+        if not verdict.should_block:
+            return Decision.allow(EscalationLevel.DEEP_VERIFICATION)
+
+        state.stop_blocks += 1
+        METRICS.increment(M_FALSE_COMPLETION_BLOCKED, labels={"result": str(verdict.result)})
+        return Decision(
+            action=DecisionAction.BLOCK,
+            level=EscalationLevel.DEEP_VERIFICATION,
+            reason=f"AgentGuard — completion gate: {verdict.result.value}\n\n{verdict.reason}",
+        )
 
     def _on_session_end(self, event: AgentEvent, ws: Workspace) -> Decision:
         ws.store.close_session(event.session_id)

@@ -3,9 +3,9 @@
 Living status. Updated at the end of every phase.
 Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered AI Agent Reliability & Reasoning Layer.md`
 
-**Current phase:** Phase 4 — Action Validator + Verification + Completion Gate (next)
+**Current phase:** Phase 5 — Full Claude Code adapter + install UX (next)
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
-**Suite:** 260 tests passing · ruff clean
+**Suite:** 328 tests passing · ruff clean
 
 ---
 
@@ -18,8 +18,8 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | 2 | Intent Gateway + Complexity + Planning Governor | ✅ **done** | all met — see below |
 | 3 | Evidence Engine + Contradiction Engine | ✅ **done** | all met — see below |
 | 3.5 | Storage foundation & data lifecycle | ✅ **done** | all met — see below |
-| 4 | Action Validator + Verification + Completion Gate | ⬜ next | — |
-| 5 | Full Claude Code adapter + install UX | ⬜ not started | — |
+| 4 | Action Validator + Verification + Completion Gate | ✅ **done** | all met — see below |
+| 5 | Full Claude Code adapter + install UX | ⬜ next | — |
 | 6 | 🔬 First real-world validation (§50 milestone) | ⬜ not started | — |
 | 7 | Act II — performance & reliability hardening | ⬜ blocked on Phase 6 sign-off | — |
 | 8 | Act II — agent interoperability (MCP, Cursor, Codex) | ⬜ blocked | — |
@@ -118,6 +118,28 @@ intelligence built on them is Act II Phases 9–11.
 Identity follows the **git remote** when there is one, so a project that is moved or
 re-cloned keeps its accumulated memory rather than starting over.
 
+## Phase 4 — exit criteria
+
+| Criterion | Result |
+|---|---|
+| A lying "all tests pass" turn is caught and blocked | ✅ driven through the real Guard, end to end |
+| §18 scope violation challenged | ✅ 17 unrelated files caught; adjacent work not |
+| Gate loop safety | ✅ per-task cap plus `stop_hook_active`; the gate yields rather than loops |
+| The gate is quiet on ordinary turns | ✅ 6 silence cases: no changes, docs-only, no runner, uncovered code, unreadable output, no task |
+| Risky commands surfaced, not overruled | ✅ 7 dangerous / 12 ordinary, incl. `--force` vs `--force-with-lease` |
+| Latency unchanged | ✅ 0.98 ms p95 end-to-end |
+
+**How the lie is caught.** AgentGuard does not run the tests. When the agent runs `pytest`
+the output arrives in `PostToolUse`, and that output is ground truth. An agent that ran the
+suite, saw two failures, and then says "all tests pass" has been contradicted by an
+artefact it produced itself — no re-execution, no fixture conflicts, no latency.
+
+**The bug this phase found.** `event.task_id` was resolved *after* the handler ran, so
+every handler saw `None`. The challenge ledger treats a missing task as "no way to avoid
+repeating myself" and suppresses everything — meaning **every challenge in the real
+pipeline was being silently dropped**. Phase 3's tests called `evidence.check()` directly
+and passed throughout. Only an end-to-end test through the Guard exposed it.
+
 ## Spec conformance suite
 
 Acceptance tests derived from the SPEC's own worked examples. These are the real
@@ -129,8 +151,7 @@ definition of "it works".
 | `test_s08_latency_budget` (6 tests) | §8 | ✅ |
 | `test_s12_proportional_planning` (57 tests) | §2, §9, §10, §12, §13, §34 | ✅ |
 | `test_s14_evidence` (57 tests) | §14, §15, §16, §17, §39 | ✅ |
-| `test_s18_scope_violation` | §18 | ⬜ Phase 4 |
-| `test_s19_false_completion` | §19 | ⬜ Phase 4 |
+| `test_s18_validation_and_completion` (68 tests) | §18, §19, §20 | ✅ |
 | `test_s33_end_to_end` | §33 | ⬜ Phase 5 |
 
 ---
@@ -180,14 +201,22 @@ src/agentguard/
 ├── challenge/        ── Contradiction Engine (§16, §17) ──
 │   ├── renderer.py   the challenge text the host reads
 │   └── ledger.py     rationing — once per concern, hard ceiling per task
+├── validate/         ── Action Validator (§18) ──
+│   ├── checks.py     scope creep, proportionality, risky commands, consistency
+│   └── validator.py  the cost-ordered pipeline and its decisions
+├── verify/           ── Verification + Completion Gate (§19, §20) ──
+│   ├── runners.py    runner detection, test-command recognition, output parsing
+│   ├── static.py     does the changed code still parse?
+│   └── completion_gate.py  PASS / INCOMPLETE / VERIFICATION_FAILED / HUMAN_REVIEW
 ├── daemon/app.py     FastAPI, 127.0.0.1, token auth, handshake file
 └── cli/main.py       install · uninstall · doctor · log · why · index · find-symbol ·
                       explain · daemon
 ```
 
-`user_prompt` runs Intent → Complexity → Planning and injects the budget. `pre_tool_use`
-runs the Evidence Engine and challenges through the ledger. `stop` is wired but still
-returns ALLOW — Phase 4 fills it in. `post_tool_use` keeps the index fresh.
+Every hook is now live. `user_prompt` runs Intent → Complexity → Planning and injects the
+budget; `pre_tool_use` runs the full validation pipeline; `post_tool_use` observes what
+happened (files touched, tests run) and keeps the index fresh; `stop` runs the Completion
+Gate; `session_end` closes out and runs storage maintenance.
 
 ---
 
@@ -243,6 +272,14 @@ returns ALLOW — Phase 4 fills it in. `post_tool_use` keeps the index fresh.
   nothing about them.
 - **Only *newly introduced* claims are checked.** Pre-existing problems in a file are never
   attributed to the edit that touched something else.
+- **Read the agent's test output rather than running tests.** The output is ground truth
+  and arrives free in `PostToolUse`. Running a second suite concurrently invites conflicts
+  over ports, fixtures and temp files, and is slow on a path meant to be invisible.
+- **"Could not tell" is never "failed".** Unrecognised test output yields no opinion.
+  Accusing an agent of breaking tests on the strength of an unparsed string is worse than
+  silence.
+- **Unit tests that bypass the wiring can pass while the product does nothing.** The
+  task-id bug proved it. Every phase now needs at least one test through the real Guard.
 - **Project isolation is a type, not a convention.** With one shared database, the engine
   holds only a project-scoped handle; a cross-project query is unrepresentable rather than
   merely discouraged.
@@ -316,3 +353,8 @@ returns ALLOW — Phase 4 fills it in. `post_tool_use` keeps the index fresh.
   database, retention tiers, bounded rows, background maintenance, disk-space degradation,
   and the `memories` table that Phase 9 will promote into. `agentguard db stats |
   projects | maintain` make the lifecycle observable.
+- **Phase 4 complete.** 328 tests, ruff clean. Action Validator (scope creep,
+  proportionality, risky commands), Verification (runner detection, test-output parsing,
+  static syntax checks) and the Completion Gate. A turn that claims passing tests it did
+  not earn is now blocked with the agent's own output as evidence. Found and fixed a bug
+  that had been suppressing every challenge in the real pipeline.
