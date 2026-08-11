@@ -3,7 +3,7 @@
 Living status. Updated at the end of every phase.
 Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered AI Agent Reliability & Reasoning Layer.md`
 
-**Current phase:** Phase 6 ✅ — §50 milestone met. **Awaiting your sign-off to start Act II.**
+**Current phase:** Phase 7 — **AgentGuard-Bench** (moved up from 12: does this actually help?)
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
 **Suite:** 372 tests passing · ruff clean
 
@@ -21,12 +21,13 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | 4 | Action Validator + Verification + Completion Gate | ✅ **done** | all met — see below |
 | 5 | Full Claude Code adapter + install UX | ✅ **done** | all met — see below |
 | 6 | 🔬 First real-world validation (§50 milestone) | ✅ **done** | met — `docs/VALIDATION-phase6.md` |
-| 7 | Act II — performance & reliability hardening | ⬜ blocked on Phase 6 sign-off | — |
-| 8 | Act II — agent interoperability (MCP, Cursor, Codex) | ⬜ blocked | — |
-| 9 | Act II — persistent project memory foundation | ⬜ blocked | — |
-| 10 | Act II — local semantic memory (sqlite-vec + FTS5) | ⬜ blocked | — |
-| 11 | Act II — memory validation & intelligence | ⬜ blocked | — |
-| 12 | Act II — AgentGuard-Bench + production release | ⬜ blocked | — |
+| 7 | **AgentGuard-Bench — measured, with a control arm** | ⬜ **next** | — |
+| 8 | Act II — performance & reliability hardening | ⬜ blocked | — |
+| 9 | Act II — agent interoperability (MCP, Cursor, Codex) | ⬜ blocked | — |
+| 10 | Act II — persistent project memory foundation | ⬜ blocked | — |
+| 11 | Act II — local semantic memory (sqlite-vec + FTS5) | ⬜ blocked | — |
+| 12 | Act II — memory validation & intelligence | ⬜ blocked | — |
+| 13 | Act II — production release | ⬜ blocked | — |
 
 Legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ done with caveats · 🔴 blocked
 

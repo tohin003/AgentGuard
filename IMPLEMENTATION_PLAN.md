@@ -488,16 +488,66 @@ does not, we iterate here rather than proceeding.
 ### Act II — production hardening + persistent intelligence
 *(starts only after your Phase 6 sign-off; structure follows the ACT II memory plan)*
 
+> **Reordered 2026-08-11 at the user's request.** The benchmark was Phase 12, behind
+> hardening, adapters and the entire memory system. It is now **Phase 7 — next** — because
+> the question it answers ("is this useful, or over-engineering?") should be settled before
+> more is built on top, not after. Every later phase then gets a before/after number
+> instead of an opinion.
+
+### Phase 7 — AgentGuard-Bench  ⟵ **NEXT**  (SPEC §36, §37)
+
+**The benchmark has to be able to say the project is worthless.** A design that cannot
+produce that result is not a measurement, it is a demonstration — and I have already built
+the demonstration in Phase 6. So the rules are set before any number is generated:
+
+**Pre-registered, before running anything**
+- Success criteria written down first. If AgentGuard does not beat the control arm on
+  hallucinated references *and* false completions, the honest conclusion is that the
+  evidence engine and the completion gate are not earning their cost.
+- A **stated kill condition**: if the control arm performs as well within noise on the
+  metrics AgentGuard exists to move, that goes in the README, and the phases built on the
+  assumption get reconsidered — including reverting them.
+
+**Method**
+- Two arms, identical in every respect except `AGENTGUARD_DISABLE`: same prompts, same
+  model, same repository state (`git reset --hard` between runs), same permission mode.
+- **n ≥ 3 runs per task per arm.** Agents are stochastic; a single run of each proves
+  nothing, and reporting one would be dishonest.
+- Tasks seeded across the SPEC §36 domains, each with a **deterministic** oracle: does the
+  named symbol exist, did unrelated files change, does the suite pass, did the agent claim
+  completion it had not earned. **Scored by a script, never by reading transcripts** — I
+  built the thing being measured and cannot be the judge of it.
+
+**Metrics** (SPEC §37) — hallucinated references · unsupported assumptions · files modified
+· unnecessary files modified · false completion rate · requirement coverage · tool calls ·
+tokens · wall-clock latency overhead.
+
+**Known weaknesses, stated up front rather than discovered later**
+- Small n gives wide confidence intervals. The report will show per-run results, not just
+  means, so the spread is visible.
+- I designed the tasks, and could bias them toward what AgentGuard happens to catch. Half
+  the corpus is therefore drawn from failures observed in real sessions rather than
+  invented, and the task list ships in the repo for anyone to disagree with.
+- Two arms cannot separate "AgentGuard helped" from "the model had a good day". Only n and
+  variance reporting mitigate that; nothing eliminates it.
+
+**Cost:** roughly `tasks × 2 arms × 3 runs` live agent sessions. A 12-task corpus is ~72
+sessions of real usage. That is the price of an actual answer.
+
+**Exit criteria** — a table of measured numbers with variance, an honest verdict, and the
+README's claims rewritten to match. If the verdict is "no measurable benefit", that is the
+result and it gets published.
+
 | Phase | Content | Source |
 |---|---|---|
-| **7 — Performance & reliability hardening** | Engineering Policy Packs (full YAML set), aggressive caching, decision logs, perf instrumentation, hook-input fuzzing, concurrency, huge-repo/monorepo scale, security review of the daemon | SPEC §11, §30, §39, §41 |
-| **8 — Agent interoperability** | MCP server (`inspect_repository`, `find_symbol`, `find_evidence`, `check_complexity`, `validate_action`, `get_domain_policy`, `verify_requirement`, `run_verification`), Cursor adapter, Codex adapter | SPEC §24, §25 |
-| **9 — Persistent project memory foundation** | Memory promotion (session → validated knowledge, *not* every response), the seven high-value memory types, retention tiers, project isolation at the memory layer, archival export | Memory plan §3–§5, §9 · ACT II "memory lifecycle" |
-| **10 — Local semantic memory** | `EmbeddingProvider` abstraction (optional extra, never a core dependency), sqlite-vec, FTS5, hybrid retrieval, non-LLM reranking (similarity + keyword + project + freshness + confidence + source relevance) | ACT II "hybrid search", "reranking" |
-| **11 — Memory validation & intelligence** | Staleness detection, evidence re-verification, memory confidence, contradiction detection, context injection — plus **incremental revalidation**: file changes invalidate only the memories that cite them, in background | ACT II "memory confidence", "updating should be incremental" |
-| **12 — AgentGuard-Bench + production release** | Three-way benchmark (agent · agent+AgentGuard · agent+AgentGuard+memory), SPEC §37 metrics extended with retrieval precision and stale-memory rate; then PyPI, versioned release, `uv tool install`, docs site | SPEC §36, §37 · ACT II "research opportunity" |
+| **8 — Performance & reliability hardening** | Engineering Policy Packs (full YAML set), aggressive caching, decision logs, perf instrumentation, hook-input fuzzing, concurrency, huge-repo/monorepo scale, security review of the daemon | SPEC §11, §30, §39, §41 |
+| **9 — Agent interoperability** | MCP server (`inspect_repository`, `find_symbol`, `find_evidence`, `check_complexity`, `validate_action`, `get_domain_policy`, `verify_requirement`, `run_verification`), Cursor adapter, Codex adapter | SPEC §24, §25 |
+| **10 — Persistent project memory foundation** | Memory promotion (session → validated knowledge, *not* every response), the seven high-value memory types, retention tiers, project isolation at the memory layer, archival export | Memory plan §3–§5, §9 · ACT II "memory lifecycle" |
+| **11 — Local semantic memory** | `EmbeddingProvider` abstraction (optional extra, never a core dependency), sqlite-vec, FTS5, hybrid retrieval, non-LLM reranking (similarity + keyword + project + freshness + confidence + source relevance) | ACT II "hybrid search", "reranking" |
+| **12 — Memory validation & intelligence** | Staleness detection, evidence re-verification, memory confidence, contradiction detection, context injection — plus **incremental revalidation**: file changes invalidate only the memories that cite them, in background | ACT II "memory confidence", "updating should be incremental" |
+| **13 — Production release** | Re-run Phase 7's benchmark with the memory arm added (agent · +AgentGuard · +memory), extended with retrieval precision and stale-memory rate; then PyPI, versioned release, `uv tool install`, docs site | SPEC §36, §37 · ACT II "research opportunity" |
 
-Deferred to a Phase 13 if wanted: Copilot / OpenHands / ACP adapters, IDE dashboard,
+Deferred to a Phase 14 if wanted: Copilot / OpenHands / ACP adapters, IDE dashboard,
 browser-extension experiments (SPEC §43–§44).
 
 **Explicitly not adopted** (ACT II plan, "What I would NOT do"): Pinecone, Weaviate,
