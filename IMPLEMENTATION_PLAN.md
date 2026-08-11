@@ -469,8 +469,9 @@ class *without* the method the agent will reach for, a runnable test suite):
 4. **Complex task** (§34 production-readiness) → expect: DEEP depth, *no* simplicity pressure.
 5. **False-completion bait** → expect: Stop blocked with an accurate reason.
 
-**Pass B — realism check** on a *copy* of Origin V1 (cloned to a temp directory; nothing of
-the user's is at risk), with ordinary prompts rather than scripted ones. Pass A cannot
+**Pass B — realism check** on a *copy* of a large private monorepo (cloned to a temp
+directory; nothing of the developer's is at risk), with ordinary prompts rather than
+scripted ones. Pass A cannot
 surprise me — it is seeded to conditions I chose. Phase 3 already demonstrated the danger
 there: a hand-written corpus passed 26/26 while real code showed a 2.2% false-positive
 rate. Pass B is where "is it actually invisible during normal work" gets answered.
