@@ -1,0 +1,7 @@
+{
+  "session_id": "sess-captured",
+  "transcript_path": "/workspace/.transcript.jsonl",
+  "cwd": "/workspace",
+  "hook_event_name": "SessionStart",
+  "source": "startup"
+}

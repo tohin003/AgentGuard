@@ -55,7 +55,19 @@ SUBSCRIBED_EVENTS: tuple[str, ...] = tuple(EVENT_MAP)
 
 
 def to_event(payload: dict[str, Any]) -> AgentEvent | None:
-    """Claude Code hook payload -> AgentEvent. Returns None for events we ignore."""
+    """Claude Code hook payload -> AgentEvent. Returns None for events we ignore.
+
+    Field names here are taken from **captured live payloads**
+    (`tests/fixtures/hook_payloads/`), not from the documentation. Two of them differ,
+    and both differences silently disabled a whole phase of work:
+
+    * the prompt arrives as ``prompt``, not ``prompt_text`` — the documented name — so
+      the Intent Gateway was scoring an empty string on every real prompt;
+    * tool results arrive as ``tool_response``, not ``tool_output``, and as a *dict*
+      rather than a string — so the Completion Gate never saw a single test result.
+
+    Both documented names are still accepted, in case they are version-dependent.
+    """
     hook_name = payload.get("hook_event_name", "")
     event_type = EVENT_MAP.get(hook_name)
     if event_type is None:
@@ -69,8 +81,8 @@ def to_event(payload: dict[str, Any]) -> AgentEvent | None:
         tool=payload.get("tool_name"),
         arguments=payload.get("tool_input") or {},
         tool_use_id=payload.get("tool_use_id"),
-        result=payload.get("tool_output"),
-        prompt_text=payload.get("prompt_text"),
+        result=payload.get("tool_response", payload.get("tool_output")),
+        prompt_text=payload.get("prompt") or payload.get("prompt_text"),
         last_assistant_message=payload.get("last_assistant_message"),
         raw=payload,
     )

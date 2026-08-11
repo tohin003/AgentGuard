@@ -1,0 +1,15 @@
+{
+  "session_id": "sess-captured",
+  "transcript_path": "/workspace/.transcript.jsonl",
+  "cwd": "/workspace",
+  "prompt_id": "653b3099-a0c2-48da-8685-5e299f23cb42",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "xhigh"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Created `src/hello.py:1` with a `hello()` function returning `'hello'`.",
+  "background_tasks": [],
+  "session_crons": []
+}

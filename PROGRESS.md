@@ -5,7 +5,7 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 
 **Current phase:** Phase 6 — First real-world validation (§50 milestone) — **your checkpoint**
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
-**Suite:** 348 tests passing · ruff clean
+**Suite:** 359 tests passing · ruff clean
 
 ---
 
@@ -248,7 +248,18 @@ Gate; `session_end` closes out and runs storage maintenance.
 
 ## Verified facts (confirmed, not assumed)
 
-- **2026-08-11** — Claude Code hook contract verified against `code.claude.com/docs/en/hooks`:
+- **2026-08-11** — **Hook payloads captured from a live session** and saved as fixtures in
+  `tests/fixtures/hook_payloads/`. Two documented field names are wrong in practice, and
+  each silently disabled a whole phase:
+  - the prompt arrives as **`prompt`**, not `prompt_text` → the Intent Gateway was scoring
+    an empty string on every real prompt (Phase 2 inert in production).
+  - tool results arrive as **`tool_response`**, a **dict** (`{stdout, stderr, …}`), not
+    `tool_output` as a string → the Completion Gate never saw a test result (Phase 4's
+    central mechanism never fired).
+  Confirmed correct as documented: `cwd`, `session_id`, `tool_name`, `tool_input`,
+  `tool_use_id`, `last_assistant_message`, `stop_hook_active`, `source`.
+- **2026-08-11** — Claude Code hook contract as *documented* at `code.claude.com/docs/en/hooks`
+  (superseded above where the two differ):
   - `PreToolUse` → `permissionDecision: allow|deny|ask|defer`, `permissionDecisionReason`,
     `additionalContext`, **`updatedInput`** (⇒ SPEC §18 `MODIFY` is implementable).
   - `PostToolUse` → `decision:"block"` + `reason`, `additionalContext`, `updatedToolOutput`.
@@ -298,6 +309,10 @@ Gate; `session_end` closes out and runs storage maintenance.
   nothing about them.
 - **Only *newly introduced* claims are checked.** Pre-existing problems in a file are never
   attributed to the edit that touched something else.
+- **Documentation is a hypothesis; captured payloads are evidence.** Both field-name bugs
+  were invisible to 348 passing tests, because every test fed the adapter payloads written
+  from the same docs the adapter was written from. Tests now run against real captured
+  payloads.
 - **A safety layer must not fail silently.** A developer who believes they are guarded and
   is not is worse off than one who knows. Fail-open stays; being quiet about it does not.
 - **Defaults that only tests override are untested defaults.** The daemon's port default

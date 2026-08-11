@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from agentguard.repo.index import RepoIndex
 
@@ -156,6 +157,22 @@ _JEST_TESTS = re.compile(r"Tests:\s+(?P<body>.+)")
 _JEST_COUNTS = re.compile(r"(\d+)\s+(passed|failed|skipped|todo)", re.IGNORECASE)
 _CARGO = re.compile(r"test result:\s*(?P<status>ok|FAILED)\.\s*(?P<counts>[^\n]*)")
 _GO_FAIL = re.compile(r"^(FAIL|ok)\s+\S+", re.MULTILINE)
+
+
+def output_text(result: Any) -> str:
+    """Flatten a tool result into the text a test runner printed.
+
+    Claude Code delivers Bash results as a dict — ``{"stdout": ..., "stderr": ...}`` —
+    and pytest writes its summary line to stdout while a failing runner often writes to
+    stderr, so both are needed. Confirmed against a captured live payload.
+    """
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        parts = [str(result.get(key, "")) for key in ("stdout", "stderr", "output", "content")]
+        joined = "\n".join(part for part in parts if part)
+        return joined or str(result)
+    return "" if result is None else str(result)
 
 
 def parse_output(command: str, output: str) -> TestOutcome:

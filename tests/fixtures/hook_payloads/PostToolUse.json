@@ -1,0 +1,25 @@
+{
+  "session_id": "sess-captured",
+  "transcript_path": "/workspace/.transcript.jsonl",
+  "cwd": "/workspace",
+  "prompt_id": "09950e2a-8d71-4b2a-bd49-6f658eb32836",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "xhigh"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo 'test output here'",
+    "description": "Echo test output"
+  },
+  "tool_response": {
+    "stdout": "test output here",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_016oJA9XQHRuoxNpQNynPMaP",
+  "duration_ms": 533
+}

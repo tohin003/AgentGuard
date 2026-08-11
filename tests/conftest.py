@@ -23,6 +23,12 @@ from agentguard.core.engine import Guard
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A fresh AGENTGUARD_HOME per test.
@@ -35,6 +41,10 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     home = tmp_path / "agentguard-home"
     home.mkdir(parents=True, exist_ok=True)
+    # Give every test its own port. Otherwise a daemon spawned without `--port` picks the
+    # configured default (8787) and collides with the developer's real daemon, or with a
+    # sibling test — making the suite depend on what else is running on the machine.
+    home.joinpath("config.toml").write_text(f"[daemon]\nport = {free_port()}\n", encoding="utf-8")
     monkeypatch.setenv("AGENTGUARD_HOME", str(home))
     monkeypatch.delenv("AGENTGUARD_DISABLE", raising=False)
     Database.reset_shared()
@@ -54,12 +64,6 @@ def guard(workspace: Path) -> Iterator[Guard]:
     g = Guard(Settings())
     yield g
     g.close()
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 class DaemonProcess:
@@ -146,7 +150,8 @@ def user_prompt_submit(text: str, cwd: str = "/tmp/ws") -> dict:
         "cwd": cwd,
         "permission_mode": "default",
         "hook_event_name": "UserPromptSubmit",
-        "prompt_text": text,
+        # `prompt`, not the documented `prompt_text` — see tests/fixtures/hook_payloads/.
+        "prompt": text,
     }
 
 

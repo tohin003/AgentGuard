@@ -267,10 +267,8 @@ class Guard:
             return
         state.verification.commands_seen.append(command.strip()[:200])
 
-        output = event.result
-        if not isinstance(output, str):
-            output = "" if output is None else str(output)
-        outcome = runners.parse_output(command, output)
+        # Tool results arrive as a dict from Claude Code; stdout and stderr both matter.
+        outcome = runners.parse_output(command, runners.output_text(event.result))
         if outcome.passed is not None:
             state.verification.outcomes.append(outcome)
             ws.store.finish_verification(

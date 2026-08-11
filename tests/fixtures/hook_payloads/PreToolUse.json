@@ -1,0 +1,17 @@
+{
+  "session_id": "sess-captured",
+  "transcript_path": "/workspace/.transcript.jsonl",
+  "cwd": "/workspace",
+  "prompt_id": "653b3099-a0c2-48da-8685-5e299f23cb42",
+  "permission_mode": "acceptEdits",
+  "effort": {
+    "level": "xhigh"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/private/tmp/claude-501/-Users-xyx-Projects-AgentGuard/3cb78df6-919d-43c7-8f38-11177d73e1b1/scratchpad/ph6-proj/src/hello.py",
+    "content": "def hello():\n    return 'hello'\n"
+  },
+  "tool_use_id": "toolu_018ctGquB6FXKsrnMg4unjGv"
+}
