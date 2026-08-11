@@ -34,15 +34,47 @@ build and [`PROGRESS.md`](PROGRESS.md) for what actually works today.
 
 ## Install (development)
 
+Put `agentguard` on your PATH. `--editable` means it tracks this source tree, so changes
+take effect without reinstalling:
+
 ```bash
-uv sync --all-extras
-uv run agentguard install claude    # writes hooks into ~/.claude/settings.json
-uv run agentguard daemon start
-uv run agentguard doctor
+uv tool install --editable /path/to/AgentGuard
 ```
 
-Detach at any time with `agentguard uninstall claude`, or disable without uninstalling by
-setting `AGENTGUARD_DISABLE=1`.
+Then, **from the repository you want guarded**:
+
+```bash
+cd /path/to/your-project
+agentguard install claude --project   # -> ./.claude/settings.local.json (gitignored)
+agentguard daemon start               # optional: SessionStart does this too
+agentguard doctor                     # confirm everything is wired
+```
+
+`--project` attaches AgentGuard to that repository only. Use `--global` instead to attach
+to every project, which writes to `~/.claude/settings.json`.
+
+Running it as `uv run agentguard …` only works from inside this repository, because that
+form uses the project's own virtualenv.
+
+### Turning it off
+
+```bash
+agentguard off                  # stays installed, decides nothing
+agentguard on
+AGENTGUARD_DISABLE=1 claude     # off for one session
+agentguard uninstall claude --project   # remove the hooks entirely
+```
+
+`uninstall` removes only what AgentGuard added; any hooks you wrote yourself are left
+alone.
+
+### Seeing what it did
+
+```bash
+agentguard log            # recent decisions
+agentguard why <id>       # the evidence behind one decision
+agentguard db stats       # what is stored, and how much room is left
+```
 
 ## License
 
