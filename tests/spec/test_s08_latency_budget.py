@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -97,6 +98,36 @@ class TestInProcess:
         finally:
             guard.close()
         report("L1 user prompt (in-process)", stats)
+        assert stats["p95"] < REPOSITORY_BUDGET_MS
+
+    def test_prompt_handling_against_a_real_index(self, tmp_path):
+        """The measurement that matters: intent + complexity + governor over a repository
+        with real symbols, imports and a real dependency graph."""
+        import shutil
+
+        from agentguard.complexity import assess
+        from agentguard.intent import extract
+        from agentguard.planning import render
+        from agentguard.repo import RepoIndex
+
+        dest = tmp_path / "pyrepo"
+        shutil.copytree(Path(__file__).parent.parent / "fixtures" / "pyrepo", dest)
+        index = RepoIndex(dest).build()
+
+        prompts = [
+            "Add pagination to /users.",
+            "Make authentication horizontally scalable across multiple services.",
+            "Rename get_user to fetch_user.",
+        ]
+
+        def once() -> None:
+            for prompt in prompts:
+                spec = extract(prompt, index)
+                spec.complexity = assess(spec, index)
+                render(spec, index)
+
+        stats = measure(once, iterations=60, warmup=10)
+        report("L1 full prompt path (indexed)", stats)
         assert stats["p95"] < REPOSITORY_BUDGET_MS
 
 

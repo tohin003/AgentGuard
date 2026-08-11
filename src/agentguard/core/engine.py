@@ -18,12 +18,14 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from agentguard import complexity, intent, planning
 from agentguard.core.config import Settings
-from agentguard.core.enums import EventType
+from agentguard.core.enums import DecisionAction, EscalationLevel, EventType
 from agentguard.core.events import AgentEvent
 from agentguard.core.metrics import M_DECISION, M_HOOK_LATENCY, METRICS, Timer
 from agentguard.core.models import Decision
 from agentguard.core.store import Store
+from agentguard.intent.models import TaskSpec
 from agentguard.repo.index import RepoIndex
 
 log = logging.getLogger(__name__)
@@ -41,6 +43,9 @@ class Workspace:
         # resolves to ALLOW (SPEC §39).
         self.index = RepoIndex(root, settings.index)
         self.index.build_async()
+        # The TaskSpec for the prompt currently being worked on. Phases 3-4 check
+        # proposed actions against it (scope, evidence, expected verification).
+        self.current_spec: TaskSpec | None = None
 
     def close(self) -> None:
         self.store.close()
@@ -130,10 +135,38 @@ class Guard:
         return Decision.allow()
 
     def _on_user_prompt(self, event: AgentEvent, ws: Workspace) -> Decision:
+        """Intent Gateway + Complexity Engine + Planning Governor (SPEC §9, §12, §13).
+
+        The planning budget rides back on `additionalContext`, which the developer never
+        sees — so this shapes the agent's approach without adding anything to the UI
+        (SPEC §39).
+        """
         ws.store.open_session(event.session_id, event.agent, str(ws.root))
-        task_id = ws.store.create_task(event.session_id, event.prompt_text or "")
+
+        prompt = event.prompt_text or ""
+        index = ws.index if ws.index.is_built else None
+        spec = intent.extract(prompt, index)
+        spec.complexity = complexity.assess(spec, index)
+        ws.current_spec = spec
+
+        task_id = ws.store.create_task(
+            event.session_id,
+            prompt,
+            spec=spec.model_dump(mode="json"),
+            complexity=spec.complexity.score,
+            depth=str(spec.complexity.depth),
+        )
         event.task_id = task_id
-        return Decision.allow()
+
+        budget = planning.render(spec, index)
+        if not budget:
+            return Decision.allow(EscalationLevel.REPOSITORY)
+
+        return Decision(
+            action=DecisionAction.ALLOW,
+            level=EscalationLevel.REPOSITORY,
+            additional_context=budget,
+        )
 
     def _on_pre_tool_use(self, event: AgentEvent, ws: Workspace) -> Decision:
         # SPEC §7/§8: read-only tools never leave Level 0. This short-circuit is what

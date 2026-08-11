@@ -435,6 +435,37 @@ class RepoIndex:
     def resolve_module(self, module: str) -> str | None:
         return self.module_map.get(module)
 
+    def search_names(self, fragment: str, limit: int = 10) -> list[SymbolRecord]:
+        """Symbols whose name contains `fragment`, case-insensitively.
+
+        Answers "does this repository already do X?" — the question behind SPEC §12's
+        "Can existing architecture solve it?" branch and SPEC §33's existing-pagination-
+        utility challenge. Exported symbols rank above private ones.
+        """
+        needle = fragment.lower()
+        if len(needle) < 3:
+            return []
+        matches = [
+            symbol
+            for name, records in self.symbols_by_name.items()
+            if needle in name.lower()
+            for symbol in records
+        ]
+        matches.sort(key=lambda s: (s.is_private, len(s.name), s.path))
+        return matches[:limit]
+
+    def search_files(self, fragment: str, limit: int = 10) -> list[str]:
+        """Files whose *name* contains `fragment` (not the directory part)."""
+        needle = fragment.lower()
+        if len(needle) < 3:
+            return []
+        matches = [
+            path
+            for path in self.files
+            if needle in path.rsplit("/", 1)[-1].lower() and not self.files[path].is_test
+        ]
+        return sorted(matches)[:limit]
+
     def is_declared_dependency(self, package: str) -> bool:
         return self.dependencies.declares(package)
 

@@ -96,12 +96,21 @@ class TestInstalledWiring:
         for event_name, payload in exchanges:
             resp = fire(hook_for(config, event_name), payload)
             assert resp.status_code == 200, f"{event_name} -> {resp.status_code}"
-            assert resp.json() == {}, f"{event_name} should be silent in Phase 0"
+            body = resp.json()
+
+            if event_name == "UserPromptSubmit":
+                # The planning budget rides in here (SPEC §9, §13). It is context for
+                # the agent, not output for the developer.
+                context = body["hookSpecificOutput"]["additionalContext"]
+                assert "[AgentGuard]" in context
+                assert "complexity" in context
+            else:
+                assert body == {}, f"{event_name} must stay silent on an ordinary action"
 
         store = Store.for_workspace(workspace)
         decisions = store.recent_decisions(50)
         assert len(decisions) == len(exchanges)
-        assert {d["action"] for d in decisions} == {"allow"}
+        assert {d["action"] for d in decisions} == {"allow"}, "nothing here warrants an objection"
 
     def test_the_prompt_creates_a_task_that_later_events_attach_to(self, installed, workspace):
         """Session/task lifecycle: tool calls must be attributable to the prompt that

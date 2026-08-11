@@ -3,9 +3,9 @@
 Living status. Updated at the end of every phase.
 Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered AI Agent Reliability & Reasoning Layer.md`
 
-**Current phase:** Phase 2 — Intent Gateway + Complexity + Planning Governor (next)
+**Current phase:** Phase 3 — Evidence Engine + Contradiction Engine (next)
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
-**Suite:** 128 tests passing · ruff clean
+**Suite:** 186 tests passing · ruff clean
 
 ---
 
@@ -15,8 +15,8 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 |---|---|---|---|
 | 0 | Foundation + hook plumbing spike | ✅ **done** | all met — see below |
 | 1 | Repository Intelligence | ✅ **done** | all met — see below |
-| 2 | Intent Gateway + Complexity + Planning Governor | ⬜ next | — |
-| 3 | Evidence Engine + Contradiction Engine | ⬜ not started | — |
+| 2 | Intent Gateway + Complexity + Planning Governor | ✅ **done** | all met — see below |
+| 3 | Evidence Engine + Contradiction Engine | ⬜ next | — |
 | 4 | Action Validator + Verification + Completion Gate | ⬜ not started | — |
 | 5 | Full Claude Code adapter + install UX | ⬜ not started | — |
 | 6 | 🔬 First real-world validation (§50 milestone) | ⬜ not started | — |
@@ -48,6 +48,27 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ done with cave
 Measured on a real 1,887-file monorepo: full build 5,647 ms · targeted `refresh_path`
 **0.18 ms p50** · full `refresh` with no changes 104 ms.
 
+## Phase 2 — exit criteria
+
+| Criterion | Result |
+|---|---|
+| The SPEC's worked examples land in their stated bands | ✅ see anchor table below |
+| Planning budget short for a rename, enumerative for deep work | ✅ 6 lines vs 18 |
+| Calibration corpus (~40 prompts) | ✅ 57 conformance tests, incl. a 10-prompt anti-over-trigger corpus |
+| No "simple" prompt escapes the DIRECT/LIGHT bands | ✅ enforced for every ordinary prompt |
+| Latency inside budget | ✅ **1.47 ms p95** full prompt path (fixture); **3.79 ms p95** on the 1,887-file monorepo |
+
+**SPEC anchors, measured:**
+
+| Prompt | SPEC says | AgentGuard says |
+|---|---|---|
+| "Rename `get_user()` to `fetch_user()`" (§13) | 2/100, direct, 3-step plan | **1/100 DIRECT**, low risk, 3 steps |
+| "Add pagination to /users" (§9) | Low complexity, **Medium** risk, backend | **10/100 DIRECT**, **medium** risk, backend — and it surfaces the existing `pagination.py` |
+| "Change the prediction API" (§10) | ml_engineering + [backend, mlops], risk high, depth deep | **exactly that** |
+| "Make auth horizontally scalable across services" (§2) | deep | **75/100 DEEP**, high risk, via `cross_boundary_floor` |
+| "Introduce distributed session caching" (§13) | 80+; investigate consistency, caching, invalidation, concurrency, rollback | **DEEP**; all five topics present |
+| "Make our inference service production-ready" (§34) | deep, and *not* "keep it simple" | **75/100 DEEP**, high risk, no simplicity pressure |
+
 ## Spec conformance suite
 
 Acceptance tests derived from the SPEC's own worked examples. These are the real
@@ -56,12 +77,8 @@ definition of "it works".
 | Test | SPEC § | Status |
 |---|---|---|
 | `test_s06_no_llm` (4 tests) | §6, §46.1 | ✅ |
-| `test_s08_latency_budget` (5 tests) | §8 | ✅ |
-| `test_s02_rename_stays_simple` | §2, §13 | ⬜ Phase 2 |
-| `test_s02_scaling_goes_deep` | §2, §13 | ⬜ Phase 2 |
-| `test_s09_pagination_intent` | §9 | ⬜ Phase 2 |
-| `test_s10_domain_multi` | §10 | ⬜ Phase 2 |
-| `test_s34_inference_deep` | §34 | ⬜ Phase 2 |
+| `test_s08_latency_budget` (6 tests) | §8 | ✅ |
+| `test_s12_proportional_planning` (57 tests) | §2, §9, §10, §12, §13, §34 | ✅ |
 | `test_s14_hallucinated_method` | §14 | ⬜ Phase 3 |
 | `test_s14_no_false_positive` | §14 | ⬜ Phase 3 |
 | `test_s17_justified_complexity` | §17 | ⬜ Phase 3 |
@@ -97,13 +114,24 @@ src/agentguard/
 │   ├── manifests.py  pyproject / requirements / package.json / go.mod / Cargo.toml
 │   ├── gitinfo.py    branch, dirty set, recent commits, per-file churn (TTL-cached)
 │   └── index.py      RepoIndex — symbol map, import + reverse-import graph, test map
+├── intent/           ── Intent Gateway (§9, §10) ──
+│   ├── lexicon.py    verbs, domain keywords, risk vocabularies, term matching
+│   ├── models.py     TaskSpec, Target, ComplexitySignal, ComplexityAssessment
+│   └── extractor.py  prompt → grounded TaskSpec (targets resolved against the index)
+├── complexity/       ── Complexity Engine (§12) ──
+│   ├── signals.py    the 8 signals, each with its reason and evidence
+│   ├── rules.py      override rules — the "decision system, not formula" part
+│   └── engine.py     scoring, banding, and risk (assessed separately)
+├── planning/
+│   └── governor.py   the planning budget the host agent reads (§13, §20)
 ├── daemon/app.py     FastAPI, 127.0.0.1, token auth, handshake file
 └── cli/main.py       install · uninstall · doctor · log · why · index · find-symbol ·
                       explain · daemon
 ```
 
-Handlers for user_prompt / pre_tool_use / stop are wired but currently return ALLOW —
-Phases 2–4 fill them in. post_tool_use already keeps the index fresh.
+`user_prompt` now runs the full Intent → Complexity → Planning pipeline and injects the
+budget. `pre_tool_use` and `stop` are wired but still return ALLOW — Phases 3–4 fill them
+in. `post_tool_use` keeps the index fresh.
 
 ---
 
@@ -140,6 +168,19 @@ Phases 2–4 fill them in. post_tool_use already keeps the index fresh.
   challenge. Found by a test during Phase 1, not in production.
 - **`knows_type()` before challenging `X.y`.** The Evidence Engine may only object to a
   missing method when it actually knows the type. Otherwise it is reasoning from ignorance.
+- **Word-start matching, never substring.** `"all" in "horizontally"` invented breadth
+  language in prompts that had none; `"make a" in "make authentication"` classified a
+  scaling task as an *add*. Single words anchor at a word start and may run on (so `auth`
+  still matches `authentication`); phrases must also close on a boundary.
+- **Complexity and risk are separate questions.** SPEC §9's pagination example is
+  explicitly low-complexity *and* medium-risk. Collapsing them would lose the case where
+  an easy change touches a contract other people depend on.
+- **Unknown scores zero.** With no index, blast radius is 0, not a guess. Scoring unknowns
+  high would make AgentGuard cautious about everything it does not understand — exactly
+  the over-planning SPEC §2 forbids.
+- **Round-robin across domains when listing what to investigate.** Taking domain concerns
+  in order let backend and ML consume every slot and silently drop MLOps — the single-lens
+  blindness SPEC §10 exists to prevent.
 
 - **AgentGuard never returns `permissionDecision: "allow"`.** "allow" bypasses the user's own
   permission rules; a guard that auto-approved would make the system less safe. It can only
@@ -188,3 +229,9 @@ Phases 2–4 fill them in. post_tool_use already keeps the index fresh.
   manifests, test map, git state. Fixture repos modelled on the SPEC's own §14/§33
   examples so later phases test against the same ground truth. Index build made async
   after measuring 5.6 s on a real monorepo. Hot-path latency unchanged.
+- **Phase 2 complete.** 186 tests, ruff clean. Intent Gateway (grounded target
+  resolution, domain classification, constraints, ambiguity), Complexity Engine (8
+  signals + 6 override rules), Planning Governor. All six SPEC anchors hit, in both
+  directions — the rename stays a 3-step rename, and production-readiness is allowed to
+  be deep. Two matching bugs found and fixed: substring term matching, and first-come
+  ordering dropping whole domains from the investigation list.
