@@ -434,6 +434,96 @@ def explain_cmd(
         _warn("covered by    no tests found")
 
 
+@app.command("report")
+def report_cmd(
+    workspace: Path = typer.Option(Path.cwd(), help="Project to report on."),
+    days: int = typer.Option(7, "-d", help="How far back to look."),
+) -> None:
+    """What AgentGuard has actually done in this project.
+
+    Deliberately reports *observations*, not effect. It can tell you how many unsupported
+    claims were challenged; it cannot tell you how many would have shipped without it,
+    because that needs a run of the same tasks with AgentGuard absent. That comparison is
+    what `agentguard bench` is for (SPEC §36) and it does not exist yet — so nothing here
+    is phrased as a reduction.
+    """
+    import time as _t
+
+    from agentguard.core.store import Database, ProjectStore
+
+    store = ProjectStore.for_workspace(workspace)
+    db = Database.shared()
+    since = _t.time() - days * 86400
+    pid = store.project_id
+
+    def scalar(sql: str, params: tuple = ()) -> int:
+        rows = db.query(sql, params)
+        return int(rows[0][0]) if rows else 0
+
+    tasks = scalar("SELECT COUNT(*) FROM tasks WHERE project_id=? AND created_at>?", (pid, since))
+    sessions = scalar(
+        "SELECT COUNT(*) FROM sessions WHERE project_id=? AND started_at>?", (pid, since)
+    )
+    actions = db.query(
+        "SELECT action, COUNT(*) n FROM decisions WHERE project_id=? AND ts>? GROUP BY action",
+        (pid, since),
+    )
+    total = sum(r["n"] for r in actions) or 1
+
+    _echo(f"{workspace}")
+    _echo(f"  last {days} days · {sessions} session(s) · {tasks} task(s)\n")
+
+    _echo("decisions")
+    for row in sorted(actions, key=lambda r: -r["n"]):
+        share = row["n"] / total * 100
+        _echo(f"  {row['action']:<16}{row['n']:>6}   {share:5.1f}%")
+
+    interventions = sum(r["n"] for r in actions if r["action"] != "allow")
+    _echo(f"\n  {interventions} intervention(s) in {total} decisions "
+          f"({interventions / total * 100:.1f}%) — the rest were silent")
+
+    findings = db.query(
+        "SELECT category, severity, subject, summary, COUNT(*) n FROM findings "
+        "WHERE project_id=? AND ts>? GROUP BY category, subject ORDER BY n DESC LIMIT 10",
+        (pid, since),
+    )
+    if findings:
+        _echo("\nwhat it caught")
+        for f in findings:
+            _echo(f"  [{f['severity']}] {f['category']:<14}{f['summary'][:60]}")
+    else:
+        _echo("\nwhat it caught\n  nothing — no unsupported claims or scope drift observed")
+
+    gate = db.query(
+        "SELECT reason FROM decisions WHERE project_id=? AND ts>? AND action='block' "
+        "ORDER BY ts DESC LIMIT 5",
+        (pid, since),
+    )
+    _echo(f"\ncompletion gate\n  held {len(gate)} turn(s) open")
+    for row in gate:
+        line = next((ln for ln in (row["reason"] or "").splitlines() if ln.strip()), "")
+        _echo(f"    {line[:74]}")
+
+    latency = [
+        float(r["latency_ms"])
+        for r in db.query(
+            "SELECT latency_ms FROM decisions WHERE project_id=? AND ts>?", (pid, since)
+        )
+    ]
+    if latency:
+        from agentguard.core.metrics import percentile
+
+        _echo(
+            f"\noverhead\n  p50 {percentile(latency, 50):.1f}ms · "
+            f"p95 {percentile(latency, 95):.1f}ms · max {max(latency):.1f}ms"
+        )
+
+    _echo(
+        "\nnote: these are observations, not an effect size. Measuring how much AgentGuard\n"
+        "      changes outcomes needs the same tasks run without it — see SPEC §36."
+    )
+
+
 # ---------------------------------------------------------------- kill switch
 
 
