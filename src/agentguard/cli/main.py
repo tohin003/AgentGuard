@@ -634,3 +634,24 @@ def version_cmd() -> None:
 
 if __name__ == "__main__":
     app()
+
+
+@app.command("bench")
+def bench_cmd(
+    repo: Path = typer.Option(..., help="Repository to run the benchmark against."),
+    settings: Path = typer.Option(..., help="Claude settings file with AgentGuard's hooks."),
+    task: list[str] = typer.Option(None, "-t", help="Task ids; default is the whole corpus."),
+    runs: int = typer.Option(3, "-n", help="Runs per task per arm."),
+    out: Path = typer.Option(Path("bench-results.json")),
+) -> None:
+    """Measure AgentGuard against a control arm (SPEC §36).
+
+    Two arms differing only in AGENTGUARD_DISABLE. Deterministic scoring, per-run results
+    kept. Designed so it can conclude there is no benefit.
+    """
+    from agentguard.bench import runner
+
+    _echo(f"repo: {repo}\ncorpus: {', '.join(task) if task else 'all'}\n")
+    payload = runner.run(repo.resolve(), settings.resolve(), list(task) if task else None, runs, out)
+    _echo("\n" + runner.render(payload))
+    _echo(f"\nper-run data: {out}")
