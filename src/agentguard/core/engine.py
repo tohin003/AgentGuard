@@ -25,7 +25,7 @@ from agentguard.core.enums import DecisionAction, EscalationLevel, EventType
 from agentguard.core.events import AgentEvent
 from agentguard.core.metrics import M_DECISION, M_HOOK_LATENCY, METRICS, Timer
 from agentguard.core.models import Decision
-from agentguard.core.store import Store
+from agentguard.core.store import ProjectStore
 from agentguard.intent.models import TaskSpec
 from agentguard.repo.index import RepoIndex
 
@@ -38,7 +38,9 @@ class Workspace:
     def __init__(self, root: Path, settings: Settings) -> None:
         self.root = root
         self.settings = settings
-        self.store = Store.for_workspace(root)
+        # A project-scoped handle on the shared database. It has no way to reach another
+        # project's rows (Memory plan §4).
+        self.store = ProjectStore.for_workspace(root, settings)
         # Built in the background: a large monorepo takes seconds, and no developer
         # should wait on it. Until it is ready every query answers "unknown", which
         # resolves to ALLOW (SPEC §39).
@@ -219,4 +221,8 @@ class Guard:
 
     def _on_session_end(self, event: AgentEvent, ws: Workspace) -> Decision:
         ws.store.close_session(event.session_id)
+        # The one moment maintenance is safe to run: the agent has stopped, so pruning
+        # and checkpointing cost nobody anything (Memory plan §7). Rate-limited inside,
+        # and it can never raise.
+        ws.store.db.maintain()
         return Decision.allow()

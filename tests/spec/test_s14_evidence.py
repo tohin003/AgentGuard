@@ -623,9 +623,9 @@ class TestChallengeRationing:
     def ledger(self, tmp_path):
         from agentguard.challenge.ledger import ChallengeLedger
         from agentguard.core.config import ChallengeSettings
-        from agentguard.core.store import Store
+        from agentguard.core.store import ProjectStore
 
-        return ChallengeLedger(Store(tmp_path / "db.sqlite"), ChallengeSettings())
+        return ChallengeLedger(ProjectStore.for_workspace(tmp_path), ChallengeSettings())
 
     def make_findings(self, n: int, severity: Severity = Severity.HIGH):
         from agentguard.core.enums import ChallengeCategory

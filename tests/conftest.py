@@ -25,11 +25,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A fresh AGENTGUARD_HOME per test.
+
+    Since Phase 3.5 there is one shared database per home directory, cached in a
+    process-wide registry — so the cache has to be dropped when the home moves, or a test
+    would keep writing into the previous test's database.
+    """
+    from agentguard.core.store import Database
+
     home = tmp_path / "agentguard-home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("AGENTGUARD_HOME", str(home))
     monkeypatch.delenv("AGENTGUARD_DISABLE", raising=False)
-    return home
+    Database.reset_shared()
+    yield home
+    Database.reset_shared()
 
 
 @pytest.fixture

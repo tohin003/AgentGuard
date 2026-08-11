@@ -26,7 +26,22 @@ def daemon_handshake_path() -> Path:
     return agentguard_home() / "daemon.json"
 
 
+def database_path() -> Path:
+    """One database for every project (Memory plan §1).
+
+    Replaces the earlier per-workspace file. A single database means one retention pass,
+    one maintenance schedule and one place for cross-session project memory, at the cost
+    of requiring project scoping on every query — which `ProjectStore` makes structural.
+    """
+    return agentguard_home() / "agentguard.db"
+
+
+def project_cache_dir(project_id: str) -> Path:
+    return agentguard_home() / "projects" / project_id
+
+
 def workspace_state_dir(workspace: str | Path) -> Path:
+    """Deprecated: pre-Phase-3.5 per-workspace location, kept for cleanup only."""
     return Path(workspace).expanduser().resolve() / ".agentguard"
 
 
@@ -106,6 +121,41 @@ class IndexSettings(BaseModel):
     )
 
 
+class RetentionSettings(BaseModel):
+    """How long each kind of data lives (Memory plan §5).
+
+    Configuration values rather than hard-coded rules, as the plan requires. `0` means
+    "keep indefinitely" — used for the two things that are worth keeping: validated
+    project memory, and violations worth learning from.
+    """
+
+    raw_events_days: int = 14  # highest volume, lowest long-term value
+    decisions_days: int = 30
+    verifications_days: int = 60
+    session_summaries_days: int = 270
+    violations_days: int = 0  # long-term
+    memories_days: int = 0  # long-term
+    metrics_days: int = 90
+
+    # Maintenance is deliberately infrequent and never runs while the agent is working.
+    maintenance_interval_hours: float = 6.0
+    vacuum_threshold_mb: float = 256.0
+
+
+class DiskSettings(BaseModel):
+    """Disk-space protection (Memory plan §8).
+
+    The critical rule: "If SQLite fails or disk space becomes unavailable, AgentGuard's
+    core reliability functionality must continue working." Below `critical_free_mb` the
+    store stops writing entirely — evidence checks, challenges and verification carry on,
+    because none of them depend on being able to persist a log line.
+    """
+
+    low_free_mb: float = 1024.0  # prune aggressively below this
+    critical_free_mb: float = 256.0  # stop writing below this
+    max_database_mb: float = 512.0
+
+
 class ChallengeSettings(BaseModel):
     """Anti-nag governance (SPEC §17, §39).
 
@@ -128,6 +178,8 @@ class Settings(BaseModel):
     latency: LatencyBudget = Field(default_factory=LatencyBudget)
     index: IndexSettings = Field(default_factory=IndexSettings)
     challenge: ChallengeSettings = Field(default_factory=ChallengeSettings)
+    retention: RetentionSettings = Field(default_factory=RetentionSettings)
+    disk: DiskSettings = Field(default_factory=DiskSettings)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:

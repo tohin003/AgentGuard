@@ -219,6 +219,19 @@ def doctor() -> None:
     if not settings.enabled:
         _warn("AgentGuard is DISABLED (AGENTGUARD_DISABLE is set, or config says enabled=false)")
 
+    _echo("\nstorage")
+    from agentguard.core.store import Database
+
+    stats = Database.shared().stats()
+    _echo(f"  {stats['path']}  ({stats['size_mb']} MB)")
+    if stats["disk_state"] == "healthy":
+        _ok(f"{stats['free_disk_mb']:.0f} MB free")
+    elif stats["disk_state"] == "low":
+        _warn(f"{stats['free_disk_mb']:.0f} MB free — pruning aggressively")
+    else:
+        _bad(f"{stats['free_disk_mb']:.0f} MB free — persistence paused (guarding continues)")
+        problems += 1
+
     _echo("\ndaemon")
     if daemon_is_alive():
         hs = read_handshake() or {}
@@ -419,6 +432,71 @@ def explain_cmd(
     else:
         _echo()
         _warn("covered by    no tests found")
+
+
+# ---------------------------------------------------------------- storage
+
+
+db_app = typer.Typer(name="db", help="Inspect and maintain local storage.", no_args_is_help=True)
+app.add_typer(db_app)
+
+
+@db_app.command("stats")
+def db_stats() -> None:
+    """Show what the database holds and how much room it has."""
+    from agentguard.core.store import Database
+
+    stats = Database.shared().stats()
+    _echo(f"database: {stats['path']}")
+    _echo(f"  size       {stats['size_mb']} MB")
+    _echo(f"  free disk  {stats['free_disk_mb']} MB  ({stats['disk_state']})")
+    _echo(f"  writes     {'enabled' if stats['writes_enabled'] else 'DISABLED (low disk)'}")
+    _echo("\nrows")
+    for table, count in stats["rows"].items():
+        _echo(f"  {table:<16}{count}")
+
+    if stats["disk_state"] == "critical":
+        _bad("free disk is critical — AgentGuard has stopped persisting, but still guards")
+    elif stats["disk_state"] == "low":
+        _warn("free disk is low — retention is pruning more aggressively")
+
+
+@db_app.command("projects")
+def db_projects() -> None:
+    """List the projects AgentGuard has seen."""
+    from agentguard.core.store import Database
+
+    rows = Database.shared().query("SELECT * FROM projects ORDER BY last_seen DESC")
+    if not rows:
+        _echo("no projects recorded yet")
+        return
+    for row in rows:
+        seen = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["last_seen"]))
+        _echo(f"{row['id']}  {row['name']:<24}{seen}")
+        _echo(f"    {row['root']}")
+        if row["git_remote"]:
+            _echo(f"    {row['git_remote']}")
+
+
+@db_app.command("maintain")
+def db_maintain(
+    force: bool = typer.Option(False, "--force", help="Ignore the rate limit."),
+) -> None:
+    """Prune expired data, checkpoint the WAL and reclaim space."""
+    from agentguard.core.store import Database
+
+    db = Database.shared()
+    before = db.size_megabytes()
+    removed = db.maintain(force=force)
+    after = db.size_megabytes()
+
+    if not removed:
+        _echo("nothing to do (run with --force to override the interval)")
+        return
+    for table, count in removed.items():
+        if count:
+            _echo(f"  pruned {count} from {table}")
+    _ok(f"{before:.2f} MB → {after:.2f} MB")
 
 
 @app.command("version")

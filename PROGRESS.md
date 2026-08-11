@@ -5,7 +5,7 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 
 **Current phase:** Phase 4 — Action Validator + Verification + Completion Gate (next)
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
-**Suite:** 244 tests passing · ruff clean
+**Suite:** 260 tests passing · ruff clean
 
 ---
 
@@ -17,10 +17,16 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | 1 | Repository Intelligence | ✅ **done** | all met — see below |
 | 2 | Intent Gateway + Complexity + Planning Governor | ✅ **done** | all met — see below |
 | 3 | Evidence Engine + Contradiction Engine | ✅ **done** | all met — see below |
+| 3.5 | Storage foundation & data lifecycle | ✅ **done** | all met — see below |
 | 4 | Action Validator + Verification + Completion Gate | ⬜ next | — |
 | 5 | Full Claude Code adapter + install UX | ⬜ not started | — |
 | 6 | 🔬 First real-world validation (§50 milestone) | ⬜ not started | — |
-| 7–12 | Act II — production | ⬜ blocked on Phase 6 sign-off | — |
+| 7 | Act II — performance & reliability hardening | ⬜ blocked on Phase 6 sign-off | — |
+| 8 | Act II — agent interoperability (MCP, Cursor, Codex) | ⬜ blocked | — |
+| 9 | Act II — persistent project memory foundation | ⬜ blocked | — |
+| 10 | Act II — local semantic memory (sqlite-vec + FTS5) | ⬜ blocked | — |
+| 11 | Act II — memory validation & intelligence | ⬜ blocked | — |
+| 12 | Act II — AgentGuard-Bench + production release | ⬜ blocked | — |
 
 Legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ done with caveats · 🔴 blocked
 
@@ -92,6 +98,26 @@ creating this file fresh" exposed four distinct bugs; after fixing them the rate
 | class-body `X = 1` was not a class attribute | every enum-style constant (`VerbClass.RENAME`) looked missing |
 | undeclared third-party imports raised at MEDIUM | transitive deps and per-service manifests are indistinguishable from invented libraries — now LOW, logged not challenged |
 
+## Phase 3.5 — exit criteria
+
+Inserted after the **Memory & Database Management Plan** and **ACT II Local Semantic
+Memory** plans. Only the parts that are cheap now and expensive to retrofit; the
+intelligence built on them is Act II Phases 9–11.
+
+| Criterion | Result |
+|---|---|
+| One database, projects → sessions (§1) | ✅ `~/.agentguard/agentguard.db`, replacing per-workspace files |
+| Project isolation (§4) | ✅ **structural** — the engine holds a `ProjectStore` with no method that can express a cross-project query; 6 tests |
+| Retention tiers, configurable (§5) | ✅ events 14 d · decisions 30 d · verifications 60 d · sessions 270 d · violations and memory kept |
+| Bounded rows (§6) | ✅ a 500 KB payload stores as <5 KB, with its size still recorded |
+| Maintenance off the hot path (§7) | ✅ runs on `SessionEnd`, rate-limited to 6 h, WAL checkpoint + incremental vacuum |
+| Disk protection (§8) | ✅ healthy / low / critical; low prunes 4× harder, critical stops writing |
+| **Storage is never a dependency** (§8 critical rule) | ✅ with the database closed mid-session the Guard still returns a decision |
+| `memories` table with ACT II metadata | ✅ created, unwritten — so Phase 9 promotion needs no migration |
+
+Identity follows the **git remote** when there is one, so a project that is moved or
+re-cloned keeps its accumulated memory rather than starting over.
+
 ## Spec conformance suite
 
 Acceptance tests derived from the SPEC's own worked examples. These are the real
@@ -118,8 +144,9 @@ src/agentguard/
 │   ├── events.py     normalized agent-agnostic AgentEvent (§23)
 │   ├── models.py     EvidenceRef, Finding, Decision (§14, §16, §18)
 │   ├── config.py     settings, daemon bind, token, kill switch
-│   ├── store.py      SQLite: sessions/tasks/events/decisions/findings/
-│   │                 challenges/verifications/metrics (§30)
+│   ├── store.py      Database (shared, maintenance, disk) + ProjectStore (scoped)
+│   │                 projects/sessions/tasks/events/decisions/findings/challenges/
+│   │                 verifications/metrics/memories (§30 · Memory plan)
 │   ├── metrics.py    latency percentiles (§8, §37)
 │   └── engine.py     Guard — the one place an event becomes a Decision (§28)
 ├── adapters/claude_code/
@@ -216,6 +243,12 @@ returns ALLOW — Phase 4 fills it in. `post_tool_use` keeps the index fresh.
   nothing about them.
 - **Only *newly introduced* claims are checked.** Pre-existing problems in a file are never
   attributed to the edit that touched something else.
+- **Project isolation is a type, not a convention.** With one shared database, the engine
+  holds only a project-scoped handle; a cross-project query is unrepresentable rather than
+  merely discouraged.
+- **Persistence is never a dependency.** Evidence checks, challenges and verification do
+  not need to write anything in order to work, so a closed database or a full disk stops
+  logging and nothing else.
 - **Round-robin across domains when listing what to investigate.** Taking domain concerns
   in order let backend and ML consume every slot and silently drop MLOps — the single-lens
   blindness SPEC §10 exists to prevent.
@@ -278,3 +311,8 @@ returns ALLOW — Phase 4 fills it in. `post_tool_use` keeps the index fresh.
   (challenge rendering in the §14 format, ledger rationing per §17/§39). A false-positive
   audit against three real repositories found four bugs the synthetic corpus could not; the
   rate went from 2.2% to 0 in 5,750 claims, and the audit is now a permanent test.
+- **Phase 3.5 complete.** 260 tests, ruff clean. Adopted the Memory & Database Management
+  Plan and restructured Act II per the Local Semantic Memory plan. Single project-scoped
+  database, retention tiers, bounded rows, background maintenance, disk-space degradation,
+  and the `memories` table that Phase 9 will promote into. `agentguard db stats |
+  projects | maintain` make the lifecycle observable.

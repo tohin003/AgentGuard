@@ -109,6 +109,57 @@ loop-breaker for the Completion Gate.
 - Storage: SQLite (WAL) at `<workspace>/.agentguard/agentguard.db`; global config at
   `~/.agentguard/config.toml`. §30.
 
+### D7 — Storage: one database, scoped by project
+
+Per the **Memory & Database Management Plan**. Supersedes the original per-workspace
+database.
+
+```
+~/.agentguard/
+├── agentguard.db        one database, all projects
+├── config.toml
+├── token · daemon.json
+└── projects/<id>/       per-project caches
+```
+
+Every row carries a `project_id`, and the engine only ever holds a **project-scoped
+handle** that cannot express a cross-project query. The memory plan's §4 — *"AgentGuard
+must never accidentally use Project A's architectural knowledge while working on Project
+B"* — is therefore a structural property, not a convention, and is tested as one.
+
+Three consequences that are reliability requirements rather than memory features, so they
+belong in Act I:
+
+* **Bounded rows.** "Never store huge objects unnecessarily" (§6): store task id,
+  decision, evidence *references*, violation type, short summary. Source stays on disk.
+* **Retention + maintenance** (§5, §7): configurable ages, pruning and checkpointing run
+  in the background and never while the agent is executing.
+* **Storage must never be a dependency.** The plan's §8 critical rule — *"If SQLite fails
+  or disk space becomes unavailable, AgentGuard's core reliability functionality must
+  continue working"* — is the same fail-open guarantee as D1, extended to storage.
+
+### D8 — Memory is an escalation capability, not a layer in the hot path
+
+Per the **ACT II Local Semantic Memory** plan. Retrieval happens for complex or ambiguous
+tasks, never on every tool call — the same escalation ladder as SPEC §7.
+
+The load-bearing idea, and the reason this strengthens rather than dilutes the thesis:
+
+> **Vector memory suggests relevant knowledge; the current repository decides whether that
+> knowledge is still true.**
+
+Three sources of truth, with distinct jobs: **current code** answers "what is true now",
+**memory** answers "what did we learn before", **host LLM** answers "what should we do".
+Memory never gets the last word — a remembered fact that the repository now contradicts is
+stale, and stale memory is worse than none.
+
+**Embeddings and the no-LLM principle.** An embedding model is not a reasoning model, so a
+pluggable embedding provider does not violate SPEC §6. The boundary that *does* need
+holding: `agentguard` core must never gain an embedding dependency. Providers arrive in
+Phase 10 as an optional extra (`agentguard[embeddings]`), import-guarded, absent by
+default. `test_s06_no_llm` is extended then to assert the *core* dependency set stays
+clean rather than relaxed.
+
 ### D5 — Package layout
 
 ```
@@ -272,6 +323,35 @@ corpus, and every seeded hallucination caught.
 
 ---
 
+### Phase 3.5 — Storage foundation & data lifecycle  ⟵ inserted after the memory plans
+**Goal:** put the storage architecture in place *before* Phase 4 starts producing the
+high-volume data it governs. Only the parts that are cheap now and expensive to retrofit;
+the intelligence built on top of them is Act II (Phases 9–11).
+
+**Deliverables**
+- Single database at `~/.agentguard/agentguard.db`, replacing per-workspace files, with a
+  `projects` table and a stable project identity (git remote when available, canonical
+  path otherwise).
+- `ProjectStore`: a project-scoped handle that **cannot** express a cross-project query.
+- `memories` table, with the ACT II plan's full metadata (`memory_type`, `source_files`,
+  `confidence`, `validation_status`, `last_verified`). Written to from Phase 9 — created
+  now so Phase 4's violations and verification results are recorded in a shape that can be
+  promoted later without a migration.
+- Retention configuration (memory plan §5) and a pruning/maintenance pass: expiry,
+  `wal_checkpoint`, incremental vacuum. Runs on `SessionEnd` and rate-limited, never
+  during agent execution (§7).
+- Bounded rows (§6): argument blobs summarised rather than stored whole.
+- Disk-space monitoring with healthy / low / critical degradation (§8).
+
+**Tests** — project isolation (A cannot read B, by construction); retention prunes exactly
+what it should and nothing long-lived; **a read-only, full, or deleted database does not
+impede a single agent action**; maintenance never runs on the hot path; row size bounded.
+
+**Exit criteria** — the §8 critical rule holds under test: with the database made
+unwritable mid-session, every hook still returns a decision and the agent proceeds.
+
+---
+
 ### Phase 4 — Action Validator + Verification + Completion Gate (§18–§20)
 **Goal:** decide, verify, and refuse to rubber-stamp "Done".
 
@@ -345,20 +425,35 @@ does not, we iterate here rather than proceeding.
 
 ---
 
-### Act II — production (starts only after your Phase 6 sign-off)
+### Act II — production hardening + persistent intelligence
+*(starts only after your Phase 6 sign-off; structure follows the ACT II memory plan)*
 
-| Phase | Content | SPEC |
+| Phase | Content | Source |
 |---|---|---|
-| **7** | Engineering Policy Packs (full YAML set), MCP server (`inspect_repository`, `find_symbol`, `find_evidence`, `check_complexity`, `validate_action`, `get_domain_policy`, `verify_requirement`, `run_verification`), decision logs, aggressive caching, perf instrumentation | §11, §25, §41 |
-| **8** | **AgentGuard-Bench** + metrics: agent-alone vs agent+AgentGuard across backend/frontend/db/devops/ml/llm/cv/security/debugging/refactoring | §36, §37, §42 |
-| **9** | Cursor adapter, Codex adapter | §24 |
-| **10** | Hardening: fuzzing hook inputs, concurrency, huge-repo scale, monorepo, error budgets, security review of the daemon | §30, §39 |
-| **11** | Packaging & distribution: PyPI, versioned releases, `pipx`/`uv tool install`, docs site, quickstart, telemetry opt-in | — |
-| **12** | Optional per §43–§44: Copilot/OpenHands/ACP adapters, IDE dashboard, browser extension experiments | §43, §44 |
+| **7 — Performance & reliability hardening** | Engineering Policy Packs (full YAML set), aggressive caching, decision logs, perf instrumentation, hook-input fuzzing, concurrency, huge-repo/monorepo scale, security review of the daemon | SPEC §11, §30, §39, §41 |
+| **8 — Agent interoperability** | MCP server (`inspect_repository`, `find_symbol`, `find_evidence`, `check_complexity`, `validate_action`, `get_domain_policy`, `verify_requirement`, `run_verification`), Cursor adapter, Codex adapter | SPEC §24, §25 |
+| **9 — Persistent project memory foundation** | Memory promotion (session → validated knowledge, *not* every response), the seven high-value memory types, retention tiers, project isolation at the memory layer, archival export | Memory plan §3–§5, §9 · ACT II "memory lifecycle" |
+| **10 — Local semantic memory** | `EmbeddingProvider` abstraction (optional extra, never a core dependency), sqlite-vec, FTS5, hybrid retrieval, non-LLM reranking (similarity + keyword + project + freshness + confidence + source relevance) | ACT II "hybrid search", "reranking" |
+| **11 — Memory validation & intelligence** | Staleness detection, evidence re-verification, memory confidence, contradiction detection, context injection — plus **incremental revalidation**: file changes invalidate only the memories that cite them, in background | ACT II "memory confidence", "updating should be incremental" |
+| **12 — AgentGuard-Bench + production release** | Three-way benchmark (agent · agent+AgentGuard · agent+AgentGuard+memory), SPEC §37 metrics extended with retrieval precision and stale-memory rate; then PyPI, versioned release, `uv tool install`, docs site | SPEC §36, §37 · ACT II "research opportunity" |
 
-Note on "deployment": AgentGuard is a **local-first developer tool** (§30 — offline,
-no network calls). "Production ready + deployed" therefore means Phase 11 (installable
-release + docs), not a cloud service. If you want a hosted component (team dashboards,
+Deferred to a Phase 13 if wanted: Copilot / OpenHands / ACP adapters, IDE dashboard,
+browser-extension experiments (SPEC §43–§44).
+
+**Explicitly not adopted** (ACT II plan, "What I would NOT do"): Pinecone, Weaviate,
+Milvus, a Qdrant server, or Postgres+pgvector. Each adds a network dependency, a service
+to deploy and a failure mode, in exchange for capability sqlite-vec already provides
+locally.
+
+**The Phase 12 question is the interesting one.** Benchmarking all three arms answers
+*"does persistent semantic memory actually improve coding-agent reliability?"* — a real
+result either way, and a far better claim than "AgentGuard uses a vector database". It is
+also the evaluation SPEC §31 demands before embeddings are allowed to stay: if memory does
+not measurably help, Phases 10–11 get reverted rather than shipped.
+
+Note on "deployment": AgentGuard is a **local-first developer tool** (§30 — offline, no
+network calls). "Production ready + deployed" therefore means Phase 12's installable
+release + docs, not a cloud service. If you want a hosted component (team dashboards,
 shared benchmarks), say so and I will add it as a separate phase.
 
 ---
