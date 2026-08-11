@@ -3,9 +3,9 @@
 Living status. Updated at the end of every phase.
 Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered AI Agent Reliability & Reasoning Layer.md`
 
-**Current phase:** Phase 3 — Evidence Engine + Contradiction Engine (next)
+**Current phase:** Phase 4 — Action Validator + Verification + Completion Gate (next)
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
-**Suite:** 186 tests passing · ruff clean
+**Suite:** 244 tests passing · ruff clean
 
 ---
 
@@ -16,8 +16,8 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | 0 | Foundation + hook plumbing spike | ✅ **done** | all met — see below |
 | 1 | Repository Intelligence | ✅ **done** | all met — see below |
 | 2 | Intent Gateway + Complexity + Planning Governor | ✅ **done** | all met — see below |
-| 3 | Evidence Engine + Contradiction Engine | ⬜ next | — |
-| 4 | Action Validator + Verification + Completion Gate | ⬜ not started | — |
+| 3 | Evidence Engine + Contradiction Engine | ✅ **done** | all met — see below |
+| 4 | Action Validator + Verification + Completion Gate | ⬜ next | — |
 | 5 | Full Claude Code adapter + install UX | ⬜ not started | — |
 | 6 | 🔬 First real-world validation (§50 milestone) | ⬜ not started | — |
 | 7–12 | Act II — production | ⬜ blocked on Phase 6 sign-off | — |
@@ -69,6 +69,29 @@ Measured on a real 1,887-file monorepo: full build 5,647 ms · targeted `refresh
 | "Introduce distributed session caching" (§13) | 80+; investigate consistency, caching, invalidation, concurrency, rollback | **DEEP**; all five topics present |
 | "Make our inference service production-ready" (§34) | deep, and *not* "keep it simple" | **75/100 DEEP**, high risk, no simplicity pressure |
 
+## Phase 3 — exit criteria
+
+| Criterion | Result |
+|---|---|
+| Every seeded hallucination caught | ✅ method-on-type (3 forms), missing import symbol, undeclared internal module, new dependency |
+| **Zero false challenges** on a legitimate-code corpus | ✅ 26 hand-written cases **and** 5,750 claims from three real repositories |
+| Challenge rationing (§17, §39) | ✅ once per concern, hard per-task ceiling, severity floor |
+| 100 ordinary operations produce nothing | ✅ enforced as a test |
+| Latency inside budget | ✅ **0.06 ms p95** on the fixture, **4.2 ms p95** on a 70-file repo |
+
+**The false-positive audit.** The hand-written corpus passed 26/26 while real code was
+producing a **2.2–2.4% false-challenge rate** — a synthetic corpus only tests its author's
+imagination. Replaying every Python file in three real repositories as "the agent is
+creating this file fresh" exposed four distinct bugs; after fixing them the rate is **0 in
+5,750 claims**. That replay is now a permanent test against AgentGuard's own source.
+
+| Bug found by the audit | Why it mattered |
+|---|---|
+| `self.root = ...` in `__init__` was never indexed | every instance attribute (`index.root`, `store.db_path`) looked hallucinated |
+| `list[Claim]` was unwrapped to `Claim` | every `claims.append(...)` became a confident claim about `Claim.append` |
+| class-body `X = 1` was not a class attribute | every enum-style constant (`VerbClass.RENAME`) looked missing |
+| undeclared third-party imports raised at MEDIUM | transitive deps and per-service manifests are indistinguishable from invented libraries — now LOW, logged not challenged |
+
 ## Spec conformance suite
 
 Acceptance tests derived from the SPEC's own worked examples. These are the real
@@ -79,10 +102,7 @@ definition of "it works".
 | `test_s06_no_llm` (4 tests) | §6, §46.1 | ✅ |
 | `test_s08_latency_budget` (6 tests) | §8 | ✅ |
 | `test_s12_proportional_planning` (57 tests) | §2, §9, §10, §12, §13, §34 | ✅ |
-| `test_s14_hallucinated_method` | §14 | ⬜ Phase 3 |
-| `test_s14_no_false_positive` | §14 | ⬜ Phase 3 |
-| `test_s17_justified_complexity` | §17 | ⬜ Phase 3 |
-| `test_s39_stays_silent` | §39 | ⬜ Phase 3 |
+| `test_s14_evidence` (57 tests) | §14, §15, §16, §17, §39 | ✅ |
 | `test_s18_scope_violation` | §18 | ⬜ Phase 4 |
 | `test_s19_false_completion` | §19 | ⬜ Phase 4 |
 | `test_s33_end_to_end` | §33 | ⬜ Phase 5 |
@@ -124,14 +144,23 @@ src/agentguard/
 │   └── engine.py     scoring, banding, and risk (assessed separately)
 ├── planning/
 │   └── governor.py   the planning budget the host agent reads (§13, §20)
+├── evidence/         ── Evidence Engine (§14, §15) ──
+│   ├── models.py     Claim, Resolution
+│   ├── pyanalysis.py Python claims + local type inference (the false-positive firewall)
+│   ├── extractors.py tool args → post-edit content → *newly introduced* claims
+│   ├── resolvers.py  claim → verdict, with the "complete evidence or silence" rule
+│   └── engine.py     one call per proposed action
+├── challenge/        ── Contradiction Engine (§16, §17) ──
+│   ├── renderer.py   the challenge text the host reads
+│   └── ledger.py     rationing — once per concern, hard ceiling per task
 ├── daemon/app.py     FastAPI, 127.0.0.1, token auth, handshake file
 └── cli/main.py       install · uninstall · doctor · log · why · index · find-symbol ·
                       explain · daemon
 ```
 
-`user_prompt` now runs the full Intent → Complexity → Planning pipeline and injects the
-budget. `pre_tool_use` and `stop` are wired but still return ALLOW — Phases 3–4 fill them
-in. `post_tool_use` keeps the index fresh.
+`user_prompt` runs Intent → Complexity → Planning and injects the budget. `pre_tool_use`
+runs the Evidence Engine and challenges through the ledger. `stop` is wired but still
+returns ALLOW — Phase 4 fills it in. `post_tool_use` keeps the index fresh.
 
 ---
 
@@ -178,6 +207,15 @@ in. `post_tool_use` keeps the index fresh.
 - **Unknown scores zero.** With no index, blast radius is 0, not a guess. Scoring unknowns
   high would make AgentGuard cautious about everything it does not understand — exactly
   the over-planning SPEC §2 forbids.
+- **A synthetic corpus only tests its author's imagination.** The hand-written
+  false-positive corpus passed 26/26 while real code showed 2.2% false challenges. Replaying
+  real repositories through the engine is now a permanent test.
+- **Complete evidence or silence.** A claim is only ever CONTRADICTED when every link holds:
+  the receiver's type is known, its file parsed cleanly, and every base class resolved. A
+  class inheriting from `pydantic.BaseModel` has methods AgentGuard cannot see, so it says
+  nothing about them.
+- **Only *newly introduced* claims are checked.** Pre-existing problems in a file are never
+  attributed to the edit that touched something else.
 - **Round-robin across domains when listing what to investigate.** Taking domain concerns
   in order let backend and ML consume every slot and silently drop MLOps — the single-lens
   blindness SPEC §10 exists to prevent.
@@ -235,3 +273,8 @@ in. `post_tool_use` keeps the index fresh.
   directions — the rename stays a 3-step rename, and production-readiness is allowed to
   be deep. Two matching bugs found and fixed: substring term matching, and first-come
   ordering dropping whole domains from the investigation list.
+- **Phase 3 complete.** 244 tests, ruff clean. Evidence Engine (claim extraction with local
+  type inference, resolution against the index, seven verdicts) and Contradiction Engine
+  (challenge rendering in the §14 format, ledger rationing per §17/§39). A false-positive
+  audit against three real repositories found four bugs the synthetic corpus could not; the
+  rate went from 2.2% to 0 in 5,750 claims, and the audit is now a permanent test.

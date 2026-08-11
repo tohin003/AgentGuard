@@ -18,7 +18,8 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from agentguard import complexity, intent, planning
+from agentguard import challenge, complexity, evidence, intent, planning
+from agentguard.challenge.ledger import ChallengeLedger
 from agentguard.core.config import Settings
 from agentguard.core.enums import DecisionAction, EscalationLevel, EventType
 from agentguard.core.events import AgentEvent
@@ -43,9 +44,10 @@ class Workspace:
         # resolves to ALLOW (SPEC §39).
         self.index = RepoIndex(root, settings.index)
         self.index.build_async()
-        # The TaskSpec for the prompt currently being worked on. Phases 3-4 check
-        # proposed actions against it (scope, evidence, expected verification).
+        # The TaskSpec for the prompt currently being worked on. Phase 4 checks
+        # proposed actions against it (scope, expected verification).
         self.current_spec: TaskSpec | None = None
+        self.ledger = ChallengeLedger(self.store, settings.challenge)
 
     def close(self) -> None:
         self.store.close()
@@ -169,11 +171,36 @@ class Guard:
         )
 
     def _on_pre_tool_use(self, event: AgentEvent, ws: Workspace) -> Decision:
+        """Evidence Engine + Contradiction Engine (SPEC §14-§17)."""
         # SPEC §7/§8: read-only tools never leave Level 0. This short-circuit is what
         # keeps ordinary exploration free.
         if event.is_read_only:
             return Decision.allow()
-        return Decision.allow()
+        if not ws.index.is_built:
+            return Decision.allow()  # nothing known yet, so nothing to contradict
+
+        findings = evidence.check(event, ws.index)
+        if not findings:
+            return Decision.allow(EscalationLevel.REPOSITORY)
+
+        verdict = ws.ledger.admit(event.task_id, findings)
+        if not verdict.should_challenge:
+            # Recorded for `agentguard log`, but the host is not interrupted. Either it
+            # has already heard this, or the task's challenge budget is spent (SPEC §39).
+            return Decision(
+                action=DecisionAction.ALLOW,
+                level=EscalationLevel.REPOSITORY,
+                findings=findings,
+                reason=verdict.reason,
+            )
+
+        ws.ledger.record(event.task_id, verdict.raise_now)
+        return Decision(
+            action=DecisionAction.CHALLENGE,
+            level=EscalationLevel.HOST_CHALLENGE,
+            reason=challenge.render(verdict.raise_now),
+            findings=findings,
+        )
 
     def _on_post_tool_use(self, event: AgentEvent, ws: Workspace) -> Decision:
         # Keep the evidence base honest: re-parse exactly the file that just changed

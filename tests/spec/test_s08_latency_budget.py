@@ -131,6 +131,40 @@ class TestInProcess:
         assert stats["p95"] < REPOSITORY_BUDGET_MS
 
 
+    def test_evidence_check_on_the_hot_path(self, tmp_path):
+        """PreToolUse now parses the post-edit file and resolves its claims. That is the
+        most expensive thing on the per-tool-call path, so it is the one to watch."""
+        import shutil
+
+        from agentguard import evidence
+        from agentguard.core.enums import EventType
+        from agentguard.core.events import AgentEvent
+        from agentguard.repo import RepoIndex
+
+        dest = tmp_path / "pyrepo"
+        shutil.copytree(Path(__file__).parent.parent / "fixtures" / "pyrepo", dest)
+        index = RepoIndex(dest).build()
+
+        target = "src/shop/api/users.py"
+        content = (dest / target).read_text()
+        event = AgentEvent(
+            event=EventType.PRE_TOOL_USE,
+            agent="claude-code",
+            workspace=str(dest),
+            session_id="s",
+            tool="Edit",
+            arguments={
+                "file_path": target,
+                "old_string": content[:120],
+                "new_string": content[:120] + "\n# touched\n",
+            },
+        )
+
+        stats = measure(lambda: evidence.check(event, index), iterations=100)
+        report("evidence check (indexed)", stats)
+        assert stats["p95"] < DETERMINISTIC_BUDGET_MS
+
+
 class TestEndToEnd:
     def test_http_hook_round_trip_within_budget(self, daemon, workspace):
         """What Claude Code actually pays per tool call.

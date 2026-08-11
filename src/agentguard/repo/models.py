@@ -101,6 +101,14 @@ class SymbolRecord:
     parent: str | None = None
     signature: str = ""
 
+    # Base classes, and whether the extractor was actually able to determine them.
+    # `bases_known=False` means "this extractor does not report inheritance", which must
+    # be read as "the attribute set of this type is unknown" — a class inheriting from
+    # something invisible has methods we cannot see, and challenging a call to one of
+    # them would be a false positive.
+    bases: tuple[str, ...] = ()
+    bases_known: bool = False
+
     @property
     def is_private(self) -> bool:
         return self.name.startswith("_") and not self.name.startswith("__")

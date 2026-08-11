@@ -28,14 +28,14 @@ def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     return f"({args}){returns}"[:_MAX_SIGNATURE]
 
 
-def _base_names(node: ast.ClassDef) -> str:
-    names = []
+def _base_names(node: ast.ClassDef) -> tuple[str, ...]:
+    names: list[str] = []
     for base in node.bases:
         try:
             names.append(ast.unparse(base))
         except Exception:  # noqa: BLE001
-            continue
-    return f"({', '.join(names)})" if names else ""
+            names.append("<unparseable>")
+    return tuple(names)
 
 
 def extract(source: str, path: str) -> tuple[list[SymbolRecord], list[ImportRecord], bool]:
@@ -56,10 +56,11 @@ def extract(source: str, path: str) -> tuple[list[SymbolRecord], list[ImportReco
     symbols: list[SymbolRecord] = []
     imports: list[ImportRecord] = []
 
-    def visit(node: ast.AST, parent: str | None) -> None:
+    def visit(node: ast.AST, parent: str | None, enclosing_class: str | None = None) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.ClassDef):
                 qualname = f"{parent}.{child.name}" if parent else child.name
+                bases = _base_names(child)
                 symbols.append(
                     SymbolRecord(
                         name=child.name,
@@ -69,10 +70,12 @@ def extract(source: str, path: str) -> tuple[list[SymbolRecord], list[ImportReco
                         line=child.lineno,
                         end_line=getattr(child, "end_lineno", child.lineno) or child.lineno,
                         parent=parent,
-                        signature=_base_names(child),
+                        signature=f"({', '.join(bases)})" if bases else "",
+                        bases=bases,
+                        bases_known=True,
                     )
                 )
-                visit(child, qualname)
+                visit(child, qualname, qualname)
 
             elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
                 qualname = f"{parent}.{child.name}" if parent else child.name
@@ -89,7 +92,7 @@ def extract(source: str, path: str) -> tuple[list[SymbolRecord], list[ImportReco
                     )
                 )
                 # Nested defs are indexed too — a closure is still a real definition.
-                visit(child, qualname)
+                visit(child, qualname, enclosing_class)
 
             elif isinstance(child, ast.Assign | ast.AnnAssign):
                 targets = child.targets if isinstance(child, ast.Assign) else [child.target]
@@ -105,6 +108,27 @@ def extract(source: str, path: str) -> tuple[list[SymbolRecord], list[ImportReco
                                 line=child.lineno,
                                 end_line=getattr(child, "end_lineno", child.lineno) or child.lineno,
                                 parent=parent,
+                            )
+                        )
+                    elif (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                        and enclosing_class
+                    ):
+                        # `self.root = ...` inside a method is an attribute of the class,
+                        # not of the method. Missing these made every instance attribute
+                        # look like a hallucination — the single largest source of false
+                        # positives found in the Phase 3 audit against real code.
+                        symbols.append(
+                            SymbolRecord(
+                                name=target.attr,
+                                qualname=f"{enclosing_class}.{target.attr}",
+                                kind="attribute",
+                                path=path,
+                                line=child.lineno,
+                                end_line=getattr(child, "end_lineno", child.lineno) or child.lineno,
+                                parent=enclosing_class,
                             )
                         )
 
@@ -133,9 +157,9 @@ def extract(source: str, path: str) -> tuple[list[SymbolRecord], list[ImportReco
             else:
                 # Descend through if/try/with so conditionally-defined symbols are found.
                 if isinstance(child, ast.If | ast.Try | ast.With | ast.AsyncWith | ast.For):
-                    visit(child, parent)
+                    visit(child, parent, enclosing_class)
 
-    visit(tree, None)
+    visit(tree, None, None)
     return symbols, imports, True
 
 
