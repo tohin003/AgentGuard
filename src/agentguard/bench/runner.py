@@ -31,7 +31,8 @@ def reset(repo: Path) -> None:
                    check=False)
 
 
-def run_once(task: BenchTask, repo: Path, arm: str, settings: Path, timeout: int = 300) -> Outcome:
+def run_once(task: BenchTask, repo: Path, arm: str, settings: Path, timeout: int = 300,
+             model: str = "") -> Outcome:
     reset(repo)
     if task.setup:
         task.setup(repo)
@@ -52,6 +53,7 @@ def run_once(task: BenchTask, repo: Path, arm: str, settings: Path, timeout: int
                 "--permission-mode", "acceptEdits",
                 "--allowedTools", "Read,Grep,Glob,Edit,Write,Bash",
                 "--output-format", "text",
+                *(["--model", model] if model else []),
             ],
             cwd=repo,
             env=env,
@@ -87,7 +89,8 @@ def run_once(task: BenchTask, repo: Path, arm: str, settings: Path, timeout: int
     return outcome
 
 
-def run(repo: Path, settings: Path, task_ids: list[str] | None, n: int, out: Path) -> dict:
+def run(repo: Path, settings: Path, task_ids: list[str] | None, n: int, out: Path,
+        model: str = "") -> dict:
     """Runs are checkpointed after every session and completed runs are resumed.
 
     Written after a run was stopped half-way to conserve quota and lost every session it
@@ -113,7 +116,7 @@ def run(repo: Path, settings: Path, task_ids: list[str] | None, n: int, out: Pat
             for run_index in range(n):
                 if (task.id, arm, run_index) in done:
                     continue
-                outcome = run_once(task, repo, arm, settings)
+                outcome = run_once(task, repo, arm, settings, model=model)
                 row = {"task": task.id, "domain": task.domain, "arm": arm, "run": run_index,
                        **asdict(outcome)}
                 results.append(row)

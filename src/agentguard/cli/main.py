@@ -643,6 +643,7 @@ def bench_cmd(
     task: list[str] = typer.Option(None, "-t", help="Task ids; default is the whole corpus."),
     runs: int = typer.Option(3, "-n", help="Runs per task per arm."),
     out: Path = typer.Option(Path("bench-results.json")),
+    model: str = typer.Option("", help="Model for the agent under test, e.g. haiku."),
 ) -> None:
     """Measure AgentGuard against a control arm (SPEC §36).
 
@@ -652,6 +653,7 @@ def bench_cmd(
     from agentguard.bench import runner
 
     _echo(f"repo: {repo}\ncorpus: {', '.join(task) if task else 'all'}\n")
-    payload = runner.run(repo.resolve(), settings.resolve(), list(task) if task else None, runs, out)
+    payload = runner.run(repo.resolve(), settings.resolve(), list(task) if task else None,
+                         runs, out, model=model)
     _echo("\n" + runner.render(payload))
     _echo(f"\nper-run data: {out}")

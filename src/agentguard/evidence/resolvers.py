@@ -152,6 +152,8 @@ class Resolver:
 
         known = self._known_attributes(owner)
         if known is None:
+            known = self._duplicates(owner)
+        if known is None:
             return None  # we do not confidently know this type — say nothing
 
         attributes, definition = known
@@ -177,6 +179,37 @@ class Resolver:
             evidence=[definition] if definition else [],
             alternatives=visible[:12],
         )
+
+    def _attributes_of_record(self, record) -> set[str] | None:
+        """Attributes of one specific class record, following its bases.
+
+        Keyed on the record rather than the name, so a duplicated class name cannot send
+        the lookup back through the ambiguous path — which is what made the first attempt
+        at duplicate handling silently do nothing.
+        """
+        if not self.index.is_parsed(record.path) or not record.bases_known:
+            return None
+
+        attributes = set(self.index.attributes_of(record.qualname))
+        bases = [b.split("[")[0].split(".")[-1].strip() for b in record.bases]
+        is_enum = any(b in _ENUM_BASES for b in bases)
+
+        for bare in bases:
+            if not bare or bare in _TRANSPARENT_BASES:
+                continue
+            if is_enum and bare in _VALUE_MIXINS:
+                continue
+            if self._is_framework_base(bare, record.path):
+                attributes |= _FRAMEWORK_API
+                continue
+            parent = self._index_class(bare)
+            if parent is None:
+                return None
+            inherited = self._attributes_of_record(parent)
+            if inherited is None:
+                return None
+            attributes |= inherited
+        return attributes
 
     def _known_attributes(self, owner: str) -> tuple[set[str], EvidenceRef | None] | None:
         """Every attribute of `owner`, or None if we cannot be sure of all of them.
@@ -207,9 +240,19 @@ class Resolver:
                         symbol=current,
                         note="defined in this edit",
                     )
+                # The same base filtering as the index path below. Without it a class
+                # defined *in the file being edited* — `class Mode(str, Enum)` — queued
+                # `str`, failed to resolve it, and bailed. Every enum declared in the file
+                # under edit was invisible, which is most of them.
+                is_enum = any(b in _ENUM_BASES for b in bases)
                 for base in bases:
                     if base.startswith("<"):
                         return None  # unreadable base class
+                    if base in _TRANSPARENT_BASES or (is_enum and base in _VALUE_MIXINS):
+                        continue
+                    if self._is_framework_base(base, self.edited_path):
+                        attributes |= _FRAMEWORK_API
+                        continue
                     pending.append(base)
                 continue
 
@@ -262,6 +305,33 @@ class Resolver:
             return False
         imported = " ".join(record.raw for record in self.index.imports_of(path))
         return any(framework in imported for framework in frameworks)
+
+    def _duplicates(self, owner: str) -> tuple[set[str], EvidenceRef | None] | None:
+        """A name declared more than once — routine in a monorepo where several services
+        each define their own `Message` or `GradingMode`.
+
+        The ambiguity is irrelevant when *every* copy lacks the attribute: whichever one
+        was meant, the member is absent. If any copy has it, stay silent, because then the
+        answer really does depend on which is which.
+        """
+        bare = owner.rsplit(".", 1)[-1]
+        candidates = [
+            symbol for symbol in self.index.find_symbol(bare)
+            if symbol.kind in ("class", "struct", "interface", "enum")
+        ]
+        if len(candidates) < 2:
+            return None
+
+        union: set[str] = set()
+        for record in candidates:
+            attributes = self._attributes_of_record(record)
+            if attributes is None:
+                return None  # one copy is unreadable, so the union proves nothing
+            union |= attributes
+        first = candidates[0]
+        return union, EvidenceRef(source="ast", path=first.path, line=first.line,
+                                  symbol=first.qualname,
+                                  note=f"{len(candidates)} definitions of this name")
 
     def _local_class(self, name: str) -> tuple[set[str], tuple[str, ...]] | None:
         """A class defined in the file currently being edited."""
