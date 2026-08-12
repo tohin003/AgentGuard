@@ -88,16 +88,38 @@ def run_once(task: BenchTask, repo: Path, arm: str, settings: Path, timeout: int
 
 
 def run(repo: Path, settings: Path, task_ids: list[str] | None, n: int, out: Path) -> dict:
+    """Runs are checkpointed after every session and completed runs are resumed.
+
+    Written after a run was stopped half-way to conserve quota and lost every session it
+    had already paid for, because results were only serialised at the end. Live agent
+    sessions cost real money and a real quota; throwing away fifteen of them to an
+    interruption is not acceptable behaviour from a measurement tool.
+    """
     selected = [t for t in task_module.TASKS if not task_ids or t.id in task_ids]
     results: list[dict] = []
+    done: set[tuple[str, str, int]] = set()
+
+    if out.exists():
+        try:
+            results = json.loads(out.read_text()).get("results", [])
+            done = {(r["task"], r["arm"], r["run"]) for r in results}
+            if done:
+                print(f"  resuming: {len(done)} session(s) already recorded", flush=True)
+        except (OSError, ValueError, KeyError):
+            results, done = [], set()
 
     for task in selected:
         for arm in ARMS:
             for run_index in range(n):
+                if (task.id, arm, run_index) in done:
+                    continue
                 outcome = run_once(task, repo, arm, settings)
                 row = {"task": task.id, "domain": task.domain, "arm": arm, "run": run_index,
                        **asdict(outcome)}
                 results.append(row)
+                # Checkpoint immediately: the next session may never happen.
+                out.write_text(json.dumps(
+                    {"n": n, "results": results, "summary": summarize(results)}, indent=2))
                 flag = "!" if (outcome.hallucinated_refs or outcome.false_completion) else " "
                 print(f"  {flag} {task.id:<22}{arm:<11}run {run_index + 1}/{n}  "
                       f"halluc={outcome.hallucinated_refs} unnec={outcome.unnecessary_files} "
