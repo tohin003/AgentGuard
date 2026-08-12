@@ -31,6 +31,16 @@ def reset(repo: Path) -> None:
                    check=False)
 
 
+def _control_settings(settings: Path) -> Path:
+    """A copy of the settings with every AgentGuard hook stripped out."""
+    from agentguard.adapters.claude_code import install as inst
+
+    control = settings.with_name("control-settings.json")
+    data = json.loads(settings.read_text()) if settings.exists() else {}
+    control.write_text(json.dumps(inst.strip_hooks(data), indent=2))
+    return control
+
+
 def run_once(task: BenchTask, repo: Path, arm: str, settings: Path, timeout: int = 300,
              model: str = "") -> Outcome:
     reset(repo)
@@ -38,18 +48,24 @@ def run_once(task: BenchTask, repo: Path, arm: str, settings: Path, timeout: int
         task.setup(repo)
 
     env = dict(os.environ)
-    if arm == "control":
-        # The single difference between the arms.
-        env["AGENTGUARD_DISABLE"] = "1"
-    else:
-        env.pop("AGENTGUARD_DISABLE", None)
+    env.pop("AGENTGUARD_DISABLE", None)
+
+    # The control arm gets a settings file with **no AgentGuard hooks in it**.
+    #
+    # It previously got AGENTGUARD_DISABLE=1 on the agent's environment, which does not
+    # work and produced three invalid benchmark runs: that variable silences the command
+    # hooks, but the http hooks are called by Claude Code directly against a long-lived
+    # daemon that never sees the agent's environment. The daemon kept evaluating every
+    # tool call, so both arms ran fully guarded and the comparison was meaningless.
+    # Removing the hooks is the only way to be sure the agent is unguarded.
+    arm_settings = settings if arm == "agentguard" else _control_settings(settings)
 
     started = time.perf_counter()
     try:
         proc = subprocess.run(
             [
                 "claude", "-p", task.prompt,
-                "--settings", str(settings),
+                "--settings", str(arm_settings),
                 "--permission-mode", "acceptEdits",
                 "--allowedTools", "Read,Grep,Glob,Edit,Write,Bash",
                 "--output-format", "text",
