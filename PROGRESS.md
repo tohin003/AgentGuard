@@ -3,7 +3,7 @@
 Living status. Updated at the end of every phase.
 Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered AI Agent Reliability & Reasoning Layer.md`
 
-**Current phase:** Phase 7 — **AgentGuard-Bench** (moved up from 12: does this actually help?)
+**Current phase:** Phase 7 — **failure-mode census** (benchmark done; it redirected the project — see IMPLEMENTATION_PLAN 'REVISED DIRECTION')
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
 **Suite:** 372 tests passing · ruff clean
 
@@ -21,7 +21,10 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | 4 | Action Validator + Verification + Completion Gate | ✅ **done** | all met — see below |
 | 5 | Full Claude Code adapter + install UX | ✅ **done** | all met — see below |
 | 6 | 🔬 First real-world validation (§50 milestone) | ✅ **done** | met — `docs/VALIDATION-phase6.md` |
-| 7 | **AgentGuard-Bench — measured, with a control arm** | ⬜ **next** | — |
+| 7a | AgentGuard-Bench | ✅ **done** | `docs/BENCH-mutation.md`, `docs/BENCH-run-01.md` |
+| 7b | **Failure-mode census (observe-only)** | ⬜ **next** | — |
+| 8 | Promote Completion Gate, demote Evidence Engine | ⬜ | — |
+| 9 | Measure proportional planning (§2/§12/§13) | ⬜ | — |
 | 8 | Act II — performance & reliability hardening | ⬜ blocked | — |
 | 9 | Act II — agent interoperability (MCP, Cursor, Codex) | ⬜ blocked | — |
 | 10 | Act II — persistent project memory foundation | ⬜ blocked | — |

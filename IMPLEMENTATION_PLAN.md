@@ -485,6 +485,62 @@ does not, we iterate here rather than proceeding.
 
 ---
 
+
+---
+
+## REVISED DIRECTION (2026-08-13) — after the benchmark
+
+The benchmark answered the question it was moved up to answer, and the answer redirected
+the project. Recorded here because the reasoning matters more than the conclusion.
+
+**What was measured.** Across two repositories (12 files and 1,887 files), two models
+(Opus and Haiku), and a genuinely unguarded control arm, the *unguarded* agent hallucinated
+**zero** times — even told outright that a method existed, on a monorepo too large to read
+exhaustively. Meanwhile the evidence engine detects hallucinated references at **90%
+recall / 100% precision** (mutation benchmark, `docs/BENCH-mutation.md`).
+
+**So: an excellent detector for a problem current models no longer have.** Not a failure of
+engineering — a failure of targeting. SPEC §3 lists fourteen failure modes and the build
+centred on the one that capability improvements have largely closed.
+
+**The strategic correction: bet on what models will not fix.** Hallucination was a
+*capability* gap, and capability gaps close. Two gaps are *architectural* and do not:
+
+1. **Agents are stateless.** Every session starts blank. A smarter model does not remember
+   Monday's decision on Friday. (This is the ACT II memory plan's thesis, and it holds.)
+2. **Agents are self-graded.** An agent judging its own completion is marking its own
+   homework however capable it is. The Completion Gate is the only mechanism that fired
+   *spontaneously* in a real session (Phase 6), catching an agent finishing without tests.
+
+### Phase 7 — Failure-mode census  ⟵ NEXT
+Observe-only mode: run against real work for a week and **count which of SPEC §3's fourteen
+failures actually occur**. All the machinery exists — every decision is already logged.
+Replaces guessing about which problem to solve with data. Cheap, and it directs everything
+after it.
+Exit: a ranked table of observed failure frequencies, published.
+
+### Phase 8 — Promote the Completion Gate; demote the Evidence Engine
+Make verified completion the headline: it is proven, cheap, and "your agent said done and
+it wasn't" is a pain developers recognise. Keep hallucination detection as a free backstop
+(0.06 ms, perfect precision) rather than the centrepiece.
+
+### Phase 9 — Measure proportional planning (SPEC §2, §12, §13)
+The most original idea in the SPEC and **entirely unmeasured**. Testable: plan length, tool
+calls, files touched and time, on trivial vs complex tasks, with and without the injected
+budget. If the budget measurably prevents over-planning on a rename, that is a result no
+competitor has.
+
+### Phase 10+ — Act II memory, unchanged in content, now first in priority after the above
+Persistent validated project knowledge is the durable moat precisely because statelessness
+is architectural.
+
+### Framing correction
+The SPEC §48 resume line must not claim hallucination reduction; that is unsupported.
+What the measurements support: a detector at 90%/100% with ~1 ms overhead and structural
+fail-open, plus a benchmark that found the target failure largely absent in current models
+and redirected the work. Measuring, getting an inconvenient answer, and changing direction
+is the stronger story.
+
 ### Act II — production hardening + persistent intelligence
 *(starts only after your Phase 6 sign-off; structure follows the ACT II memory plan)*
 
