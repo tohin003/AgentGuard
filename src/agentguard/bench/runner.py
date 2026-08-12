@@ -114,7 +114,11 @@ def run(repo: Path, settings: Path, task_ids: list[str] | None, n: int, out: Pat
     sessions cost real money and a real quota; throwing away fifteen of them to an
     interruption is not acceptable behaviour from a measurement tool.
     """
-    selected = [t for t in task_module.TASKS if not task_ids or t.id in task_ids]
+    if task_ids == ["derive"]:
+        selected = task_module.tasks_from_repo(repo, count=5)
+        print(f"  derived {len(selected)} bait task(s) from the repository itself", flush=True)
+    else:
+        selected = [t for t in task_module.TASKS if not task_ids or t.id in task_ids]
     results: list[dict] = []
     done: set[tuple[str, str, int]] = set()
 
