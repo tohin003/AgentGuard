@@ -70,6 +70,42 @@ _ENUM_BASES: frozenset[str] = frozenset(
 # Value types mixed into an enum. Ignored only when an Enum base is also present.
 _VALUE_MIXINS: frozenset[str] = frozenset({"str", "int", "float", "bytes", "tuple"})
 
+# Framework base classes whose subclasses declare their real attributes in their own body
+# (ORM columns, pydantic fields), but whose own definition is generated and invisible from
+# source. Treating them as opaque made AgentGuard silent on every model in a real
+# codebase — 138 of 160 remaining misses were SQLAlchemy models.
+#
+# The trade is explicit: to see through one of these, we must assert what it contributes,
+# and anything missed from that list becomes a *false positive*. So each base is only
+# treated as transparent when the defining file actually imports that framework, and the
+# API surface below is the price of admission. Precision is the metric worth protecting;
+# if these lists are wrong the benchmark will say so.
+_FRAMEWORK_BASES: dict[str, tuple[str, ...]] = {
+    "Base": ("sqlalchemy",),
+    "DeclarativeBase": ("sqlalchemy",),
+    "Model": ("sqlalchemy", "flask_sqlalchemy", "django"),
+    "BaseModel": ("pydantic",),
+    "BaseSettings": ("pydantic",),
+    "Document": ("mongoengine", "beanie"),
+}
+
+_FRAMEWORK_API: frozenset[str] = frozenset(
+    {
+        # SQLAlchemy declarative
+        "metadata", "registry", "query", "__table__", "__tablename__", "__mapper__",
+        "__table_args__", "_sa_instance_state", "_sa_class_manager", "c", "columns",
+        # pydantic v2 and v1
+        "model_dump", "model_dump_json", "model_validate", "model_validate_json",
+        "model_copy", "model_construct", "model_json_schema", "model_rebuild",
+        "model_fields_set", "model_extra", "model_post_init",
+        "dict", "json", "copy", "parse_obj", "parse_raw", "parse_file", "from_orm",
+        "schema", "schema_json", "construct", "validate", "update_forward_refs",
+        "Config", "fields", "__fields__", "__config__",
+        # Django-ish
+        "objects", "save", "delete", "pk", "DoesNotExist", "Meta",
+    }
+)
+
 _ALWAYS_PRESENT_ATTRIBUTES: frozenset[str] = frozenset(
     {
         "__class__", "__dict__", "__doc__", "__module__", "__name__", "__qualname__",
@@ -208,9 +244,24 @@ class Resolver:
                     continue
                 if is_enum and bare in _VALUE_MIXINS:
                     continue
+                if self._is_framework_base(bare, record.path):
+                    attributes |= _FRAMEWORK_API
+                    continue
                 pending.append(bare)
 
         return (attributes, definition) if attributes or definition else None
+
+    def _is_framework_base(self, base: str, path: str) -> bool:
+        """A generated base we can see through, but only where the framework is present.
+
+        `Base` is a common enough name that recognising it unconditionally would be
+        guessing. Requiring the defining file to import the framework keeps it evidence-led.
+        """
+        frameworks = _FRAMEWORK_BASES.get(base)
+        if not frameworks:
+            return False
+        imported = " ".join(record.raw for record in self.index.imports_of(path))
+        return any(framework in imported for framework in frameworks)
 
     def _local_class(self, name: str) -> tuple[set[str], tuple[str, ...]] | None:
         """A class defined in the file currently being edited."""
