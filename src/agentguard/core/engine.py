@@ -287,6 +287,12 @@ class Guard:
         if state is None or not ws.index.is_built:
             return Decision.allow()
 
+        # Pick up anything changed underneath us — a branch switch, a `git clean`, a
+        # colleague's rebase. `refresh_path` only covers files the *agent* touched, so
+        # without this the gate can cite a test file that no longer exists. Observed in
+        # benchmark run 01, where it recommended a deleted test.
+        ws.index.refresh(min_interval=5.0)
+
         verdict = completion_gate.evaluate(
             state=state,
             index=ws.index,

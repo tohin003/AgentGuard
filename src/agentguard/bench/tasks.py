@@ -118,6 +118,18 @@ def count_hallucinated_refs(repo: Path, symbols: tuple[str, ...]) -> int:
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 defined.add(node.name)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                # `last_login_at: str` in a dataclass IS a definition. Missing this made
+                # run 01 score six correct behaviours as hallucinations.
+                defined.add(node.target.id)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        defined.add(target.id)
+                    elif isinstance(target, ast.Attribute):
+                        defined.add(target.attr)  # `self.last_login_at = ...`
+            elif isinstance(node, ast.arg):
+                defined.add(node.arg)
             elif isinstance(node, ast.Attribute):
                 called.add(node.attr)
             elif isinstance(node, ast.Name):

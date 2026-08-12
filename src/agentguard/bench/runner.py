@@ -67,6 +67,13 @@ def run_once(task: BenchTask, repo: Path, arm: str, settings: Path, timeout: int
     duration = time.perf_counter() - started
     changed = task_module.changed_files(repo)
 
+    # A run that exited non-zero, or finished implausibly fast having changed nothing,
+    # did not happen. Run 01 scored six quota-exhausted no-ops as clean successes because
+    # `claude` exits 0 when the quota is spent.
+    if proc.returncode != 0 or (duration < 10 and not changed):
+        return Outcome(duration_s=round(duration, 1),
+                       error=f"void (exit={proc.returncode}, {len(changed)} files)")
+
     outcome = Outcome(
         hallucinated_refs=task_module.count_hallucinated_refs(repo, task.bait_symbols),
         unnecessary_files=task_module.count_unrelated_files(repo, changed, task.expected_files),
@@ -107,7 +114,7 @@ def summarize(results: list[dict]) -> dict:
     """Totals and per-run spread. Means alone would hide how noisy small-n really is."""
     summary: dict = {}
     for arm in ARMS:
-        rows = [r for r in results if r["arm"] == arm]
+        rows = [r for r in results if r["arm"] == arm and not r["error"]]
         if not rows:
             continue
         summary[arm] = {
@@ -117,6 +124,7 @@ def summarize(results: list[dict]) -> dict:
             "false_completions": sum(r["false_completion"] for r in rows),
             "duration_s_median": round(statistics.median(r["duration_s"] for r in rows), 1),
             "errors": sum(1 for r in rows if r["error"]),
+            "void": sum(1 for r in rows if r["error"].startswith("void")),
         }
     return summary
 
