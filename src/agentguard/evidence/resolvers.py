@@ -59,6 +59,17 @@ IMPORT_TO_DISTRIBUTION: dict[str, str] = {
     "multipart": "python-multipart",
 }
 
+# Bases that add nothing an agent could call by mistake.
+_TRANSPARENT_BASES: frozenset[str] = frozenset(
+    {"object", "Protocol", "ABC", "ABCMeta", "Generic", "Enum", "StrEnum", "IntEnum",
+     "IntFlag", "Flag", "ReprEnum", "NamedTuple", "TypedDict"}
+)
+_ENUM_BASES: frozenset[str] = frozenset(
+    {"Enum", "StrEnum", "IntEnum", "IntFlag", "Flag", "ReprEnum"}
+)
+# Value types mixed into an enum. Ignored only when an Enum base is also present.
+_VALUE_MIXINS: frozenset[str] = frozenset({"str", "int", "float", "bytes", "tuple"})
+
 _ALWAYS_PRESENT_ATTRIBUTES: frozenset[str] = frozenset(
     {
         "__class__", "__dict__", "__doc__", "__module__", "__name__", "__qualname__",
@@ -66,6 +77,8 @@ _ALWAYS_PRESENT_ATTRIBUTES: frozenset[str] = frozenset(
         "__enter__", "__exit__", "__iter__", "__next__", "__len__", "__call__",
         "__getattr__", "__setattr__", "__getitem__", "__setitem__", "__contains__",
         "mro", "model_config", "model_fields",
+        # Enum members carry these regardless of what the enum mixes in.
+        "name", "value", "_value_", "_name_", "_member_names_", "_member_map_",
     }
 )
 
@@ -182,9 +195,18 @@ class Resolver:
                     symbol=record.qualname,
                     note=record.kind,
                 )
-            for base in record.bases:
-                bare = base.split("[")[0].split(".")[-1].strip()
-                if not bare or bare in ("object", "Protocol", "ABC", "Generic", "Enum", "StrEnum", "IntEnum"):
+            bases = [b.split("[")[0].split(".")[-1].strip() for b in record.bases]
+            # An enum's members are entirely in its own body, so a value-type mixin does
+            # not hide anything — `class Mode(str, Enum)` is as knowable as `class Mode(Enum)`.
+            # Bailing on the unresolvable `str` was costing 159 of 160 detections on a real
+            # codebase: enums are everywhere, and AgentGuard was silent on all of them.
+            # The mixin is only ignored *alongside* an Enum base, so an ordinary class
+            # inheriting `str` still counts as unknown and stays silent.
+            is_enum = any(b in _ENUM_BASES for b in bases)
+            for bare in bases:
+                if not bare or bare in _TRANSPARENT_BASES:
+                    continue
+                if is_enum and bare in _VALUE_MIXINS:
                     continue
                 pending.append(bare)
 
