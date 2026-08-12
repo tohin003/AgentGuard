@@ -13,8 +13,10 @@ daemon still blocks nothing, it just stops being quiet about it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 
@@ -27,7 +29,7 @@ from agentguard.core.events import AgentEvent
 from agentguard.core.store import ProjectStore
 from agentguard.repo import RepoIndex
 from agentguard.validate import modify, validate
-from tests.conftest import REPO_ROOT, user_prompt_submit
+from tests.conftest import REPO_ROOT, free_port, user_prompt_submit
 
 
 @pytest.fixture
@@ -227,6 +229,61 @@ class TestVisibleFailure:
         assert first.returncode != 0
         assert second.returncode == 0, "the second prompt in the same session stays quiet"
         assert second.stderr == b""
+
+    def test_a_recycled_pid_does_not_look_like_a_running_daemon(self, isolated_home):
+        """The reboot case, made deterministic.
+
+        `daemon.json` outlives a restart; the process does not; operating systems recycle
+        PIDs. So a stale handshake can name a live but unrelated process. Here that
+        process is the test runner itself — certainly alive, certainly not the daemon —
+        paired with a port nothing is listening on.
+
+        With liveness defined as `os.kill(pid, 0)` this returned True, `--ensure-daemon`
+        started nothing, and every hook for the whole session failed open against a dead
+        port. Silently: a developer who rebooted mid-week would have collected no census
+        data and had no way to know.
+        """
+        from agentguard.adapters.claude_code import shim
+
+        stale = {"host": "127.0.0.1", "port": free_port(), "pid": os.getpid(), "token": "x"}
+        (isolated_home / "daemon.json").write_text(json.dumps(stale))
+
+        assert not shim._alive(stale), "a live unrelated process is not our daemon"
+
+    def test_a_stale_handshake_is_revived_rather_than_trusted(self, isolated_home):
+        """And the consequence that matters: the daemon actually gets started."""
+        port = free_port()
+        (isolated_home / "config.toml").write_text(f"[daemon]\nport = {port}\n")
+        (isolated_home / "daemon.json").write_text(
+            json.dumps({"host": "127.0.0.1", "port": port, "pid": os.getpid(), "token": "x"})
+        )
+
+        env = dict(os.environ, AGENTGUARD_HOME=str(isolated_home), PYTHONPATH=str(REPO_ROOT / "src"))
+        result = subprocess.run(
+            [sys.executable, "-m", "agentguard.adapters.claude_code.shim", "--health"],
+            input=json.dumps(user_prompt_submit("hi")).encode(),
+            capture_output=True,
+            env=env,
+            timeout=60,
+        )
+        handshake = json.loads((isolated_home / "daemon.json").read_text())
+        try:
+            assert result.returncode == 0, result.stderr.decode()
+            assert handshake["pid"] != os.getpid(), "the stale handshake was trusted"
+        finally:
+            with contextlib.suppress(OSError, TypeError):
+                os.kill(int(handshake["pid"]), signal.SIGTERM)
+
+    def test_daemon_is_alive_agrees(self, isolated_home, monkeypatch):
+        """`agentguard daemon stop` would otherwise SIGTERM that unrelated process."""
+        from agentguard.daemon.app import daemon_is_alive
+
+        (isolated_home / "daemon.json").write_text(
+            json.dumps(
+                {"host": "127.0.0.1", "port": free_port(), "pid": os.getpid(), "token": "x"}
+            )
+        )
+        assert not daemon_is_alive()
 
     def test_being_deliberately_disabled_is_not_reported(self, isolated_home):
         """AGENTGUARD_DISABLE=1 is a choice, not a fault."""

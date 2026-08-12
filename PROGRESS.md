@@ -256,6 +256,30 @@ rather than hidden: while observe-only is on, AgentGuard protects nothing.
 | The convention detector was silent on the clearest violation there is | A four-way snake/kebab/camel/pascal classifier made `store.py` "uncommitted" (compatible with snake *and* kebab), so a directory of single-word lowercase modules — the commonest shape in Python — proved no convention and `NewThing.py` passed. Splitting it into two independent questions (is it lowercase? which separator?) fixed it |
 | `test_the_spawned_daemon_uses_the_configured_port` was racy | It waited for the handshake file, but the daemon publishes that *before* uvicorn listens. Failed intermittently once the suite grew enough concurrent daemon startups. Now waits for an actual connect, as the other fixture already did. Reproduced and traced before fixing rather than guessed at |
 
+**A fourth, found by the user's question "can I turn my machine off?"** — and the most
+consequential of the four, because it would have quietly produced a short census.
+
+Liveness was `os.kill(pid, 0)`: does *some* process hold that number. `daemon.json`
+survives a reboot while the process does not, and operating systems recycle PIDs — so
+after a restart a stale handshake can name a live but entirely unrelated process. Then:
+
+* `SessionStart --ensure-daemon` concludes the daemon is up and starts nothing, and every
+  hook for that whole session fails open against a port nothing is listening on. Silently.
+  Fail-open working exactly as designed, and no way to tell an unguarded session from a
+  guarded one — the invisible non-guarding plan D9 exists to prevent, reached from behind;
+* worse, **`agentguard daemon stop` sends SIGTERM to that unrelated process.**
+
+Liveness now means *reachable*: `GET /health`, and the reported pid must match the
+handshake's — which also rules out something else having claimed the fixed port 8787. The
+PID check stays as a free pre-filter. `/health` also now reports `observing`, since the
+daemon reads its mode once at startup and there was otherwise no way to ask which one is
+live.
+
+Verified against the real install on this machine, not only in tests: hard-killed the
+daemon, planted a handshake naming a live unrelated process, ran the actual `SessionStart`
+command out of `~/.claude/settings.json`, and watched a fresh daemon come up in observe
+mode. Under the old rule that same handshake evaluated as alive.
+
 ## Spec conformance suite
 
 Acceptance tests derived from the SPEC's own worked examples. These are the real

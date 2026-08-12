@@ -77,6 +77,19 @@ def clear_handshake() -> None:
 
 
 def daemon_is_alive() -> bool:
+    """Whether the daemon in the handshake is actually answering.
+
+    Not a PID check. `daemon.json` outlives a reboot while the process does not, and
+    operating systems recycle PIDs, so a stale handshake can name a live but unrelated
+    process. Two things then go wrong, and the second is the serious one:
+
+    * `agentguard daemon start` reports "already running" and starts nothing, leaving
+      every hook to fail open in silence;
+    * `agentguard daemon stop` sends **SIGTERM to that unrelated process**.
+
+    So liveness is defined as "the endpoint answers `/health` and reports the pid we
+    expect" — which also rules out something else having claimed the fixed port.
+    """
     hs = read_handshake()
     if not hs:
         return False
@@ -84,10 +97,37 @@ def daemon_is_alive() -> bool:
     if not isinstance(pid, int):
         return False
     try:
-        os.kill(pid, 0)  # signal 0 = existence check
+        os.kill(pid, 0)  # free pre-filter for the common case: the process is simply gone
     except (OSError, ProcessLookupError):
         return False
-    return True
+    return _health_reports(hs, pid)
+
+
+def _health_reports(hs: dict[str, Any], pid: int) -> bool:
+    """`GET /health` on the handshake's endpoint, via stdlib.
+
+    `httpx` is a development dependency, not a runtime one, and this runs inside the CLI.
+    """
+    import http.client
+
+    try:
+        conn = http.client.HTTPConnection(
+            str(hs.get("host", "127.0.0.1")), int(hs["port"]), timeout=1.0
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    try:
+        conn.request("GET", "/health")
+        response = conn.getresponse()
+        if response.status != 200:
+            return False
+        body = json.loads(response.read().decode("utf-8", "replace"))
+        return isinstance(body, dict) and body.get("pid") == pid
+    except Exception:  # noqa: BLE001 - unreachable or not ours: either way, not alive
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            conn.close()
 
 
 def create_app(token: str, settings: Settings | None = None, guard: Guard | None = None) -> FastAPI:
@@ -108,6 +148,10 @@ def create_app(token: str, settings: Settings | None = None, guard: Guard | None
             "pid": os.getpid(),
             "uptime_s": round(time.time() - app.state.started_at, 3),
             "enabled": app.state.guard.settings.enabled,
+            # The daemon reads config once, at startup. A developer who changed the mode
+            # and forgot to restart has no other way to find out which one is live — and
+            # the two differ in whether anything is being guarded at all.
+            "observing": app.state.guard.settings.observe_only,
         }
 
     @app.get("/metrics")

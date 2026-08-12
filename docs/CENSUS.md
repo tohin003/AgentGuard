@@ -185,6 +185,21 @@ agentguard observe off         # resume guarding
 on believes they are guarded and is not, which is the same hazard plan D9 exists to
 prevent, arrived at from the other direction.
 
+### It survives reboots
+
+Nothing needs re-running across a week that includes shutdowns. The hooks live in
+`~/.claude/settings.json`, the mode in `~/.agentguard/config.toml` and the data in
+`~/.agentguard/agentguard.db` — all files. Only the daemon is a process, and it does not
+survive a restart; the `SessionStart` hook is a `command` hook precisely so that the next
+Claude Code session starts it again, reading the mode from config as it does.
+
+That guarantee had a hole, found by exactly this question. Liveness was "does some process
+hold this PID", `daemon.json` outlives a reboot, and operating systems recycle PIDs — so a
+stale handshake naming a live unrelated process made the shim skip revival, and every hook
+that session failed open in silence. It now checks that the endpoint answers `/health` and
+reports the pid it should. `curl -s 127.0.0.1:8787/health` shows `"observing": true` when
+the census is actually collecting.
+
 ## Results
 
 **Not yet available, and deliberately not estimated.**

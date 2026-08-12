@@ -25,6 +25,8 @@ import sys
 
 DEFAULT_TIMEOUT_S = 2.0
 DAEMON_START_TIMEOUT_S = 8.0
+# A localhost round trip is sub-millisecond; this only has to bound the pathological case.
+HEALTH_TIMEOUT_S = 1.0
 
 
 def _start_timeout() -> float:
@@ -57,6 +59,21 @@ def _handshake() -> dict | None:
 
 
 def _alive(hs: dict | None) -> bool:
+    """Whether the daemon named in this handshake is actually answering.
+
+    A process-existence check alone is not enough, and the gap it leaves is the reboot
+    case. `daemon.json` survives a restart while the process does not, and operating
+    systems recycle PIDs — so a stale handshake can name a live, entirely unrelated
+    process. `os.kill(pid, 0)` then succeeds, the shim concludes the daemon is up, skips
+    reviving it, and every hook for that whole session fails open against a port nothing
+    is listening on. Silently: fail-open is working exactly as designed, and the developer
+    has no way to tell an unguarded session from a guarded one.
+
+    That is the invisible non-guarding plan D9 exists to prevent, reached through the back
+    door — so liveness means *reachable*, not merely *some process holds that number*.
+    The PID check stays as a free pre-filter for the common case where the daemon is
+    simply gone.
+    """
     if not hs:
         return False
     pid = hs.get("pid")
@@ -66,7 +83,38 @@ def _alive(hs: dict | None) -> bool:
         os.kill(pid, 0)
     except OSError:
         return False
-    return True
+    return _answers_health(hs, pid)
+
+
+def _answers_health(hs: dict, pid: int) -> bool:
+    """Ask the endpoint who it is.
+
+    Matching the reported pid against the handshake's does double duty: it proves the
+    daemon is listening, and it proves the thing on that port is *our* daemon rather than
+    whatever else may have claimed a fixed port (8787) since.
+    """
+    import http.client
+
+    try:
+        conn = http.client.HTTPConnection(
+            hs.get("host", "127.0.0.1"), int(hs["port"]), timeout=HEALTH_TIMEOUT_S
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    try:
+        conn.request("GET", "/health")
+        response = conn.getresponse()
+        if response.status != 200:
+            return False
+        body = json.loads(response.read().decode("utf-8", "replace"))
+        return isinstance(body, dict) and body.get("pid") == pid
+    except Exception:  # noqa: BLE001 - unreachable, wrong service, garbage body: all "no"
+        return False
+    finally:
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            conn.close()
 
 
 def _post(hs: dict, payload: dict, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
