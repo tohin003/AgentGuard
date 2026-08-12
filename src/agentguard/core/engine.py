@@ -20,6 +20,7 @@ from pathlib import Path
 
 from agentguard import complexity, intent, planning, validate
 from agentguard.challenge.ledger import ChallengeLedger
+from agentguard.core import observe
 from agentguard.core.config import Settings
 from agentguard.core.enums import DecisionAction, EscalationLevel, EventType
 from agentguard.core.events import AgentEvent
@@ -145,6 +146,13 @@ class Guard:
                 decision = Decision.allow()
                 ws = None
 
+            # Census mode (Phase 7). The engines above all ran and their findings are
+            # intact; this removes every channel by which the result could reach the
+            # agent. Placed at the single choke point rather than in each handler, so a
+            # handler added later is silent by construction (see core/observe.py).
+            if self.settings.observe_only:
+                decision = observe.silence(decision)
+
         decision.latency_ms = t.ms
         METRICS.observe(M_HOOK_LATENCY, t.ms, {"event": str(event.event)})
         METRICS.increment(M_DECISION, labels={"action": str(decision.action)})
@@ -169,8 +177,23 @@ class Guard:
     #   stop          -> Completion Gate (§19, §20)
     #   session_end   -> close out and run storage maintenance
 
+    def _open_session(self, event: AgentEvent, ws: Workspace) -> None:
+        """Record the session, and stamp it with the mode it ran under.
+
+        The census has to be able to say which of its numbers came from an unguarded
+        agent. Findings gathered while AgentGuard was challenging and injecting planning
+        budgets describe a *steered* agent, and mixing the two silently would make the
+        headline rate meaningless.
+        """
+        ws.store.open_session(
+            event.session_id,
+            event.agent,
+            str(ws.root),
+            meta={"observe_only": self.settings.observe_only},
+        )
+
     def _on_session_start(self, event: AgentEvent, ws: Workspace) -> Decision:
-        ws.store.open_session(event.session_id, event.agent, str(ws.root))
+        self._open_session(event, ws)
         # Creating the Workspace already kicked off the build; this hook has a 20s
         # budget, so give it a moment to finish while the session is still starting up.
         ws.index.ready(timeout=5.0)
@@ -183,7 +206,7 @@ class Guard:
         sees — so this shapes the agent's approach without adding anything to the UI
         (SPEC §39).
         """
-        ws.store.open_session(event.session_id, event.agent, str(ws.root))
+        self._open_session(event, ws)
 
         prompt = event.prompt_text or ""
         index = ws.index if ws.index.is_built else None
@@ -300,14 +323,27 @@ class Guard:
             max_blocks=self.settings.challenge.max_stop_blocks_per_task,
         )
         if not verdict.should_block:
-            return Decision.allow(EscalationLevel.DEEP_VERIFICATION)
+            # Still carries findings: the gate can pass and have seen something worth
+            # counting — untested code, most often (SPEC §3, "write insufficient tests").
+            return Decision(
+                action=DecisionAction.ALLOW,
+                level=EscalationLevel.DEEP_VERIFICATION,
+                findings=verdict.findings,
+            )
 
-        state.stop_blocks += 1
-        METRICS.increment(M_FALSE_COMPLETION_BLOCKED, labels={"result": str(verdict.result)})
+        # Bookkeeping for a block that will actually happen. `observe.silence()` will turn
+        # this decision into an ALLOW, and counting a block that the agent never saw would
+        # both inflate the metric and spend the gate's per-task budget on nothing. The
+        # silence guarantee stays at the choke point; this is about side effects, which
+        # genuinely belong to the handler that causes them.
+        if not self.settings.observe_only:
+            state.stop_blocks += 1
+            METRICS.increment(M_FALSE_COMPLETION_BLOCKED, labels={"result": str(verdict.result)})
         return Decision(
             action=DecisionAction.BLOCK,
             level=EscalationLevel.DEEP_VERIFICATION,
             reason=f"AgentGuard — completion gate: {verdict.result.value}\n\n{verdict.reason}",
+            findings=verdict.findings,
         )
 
     def _on_session_end(self, event: AgentEvent, ws: Workspace) -> Decision:

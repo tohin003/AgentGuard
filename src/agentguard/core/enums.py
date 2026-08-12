@@ -142,6 +142,44 @@ class ClaimKind(StrEnum):
     TEST_EXISTS = "test_exists"
 
 
+class FailureMode(StrEnum):
+    """The agent failure modes AgentGuard exists to observe (SPEC §3).
+
+    SPEC §3 lists them as prose bullets. This enum is that list, in order, one member per
+    bullet — so a finding can say *which* documented failure it is evidence of, and the
+    census (Phase 7) can count them without inferring a taxonomy at report time.
+
+    **There are seventeen, not fourteen.** Both `IMPLEMENTATION_PLAN.md` and the Phase 7
+    brief said fourteen; the SPEC text has seventeen bullets. Counted rather than assumed,
+    which is the whole point of a census.
+
+    `NOT_A_FAILURE` is the escape hatch: some findings (a force push worth a human's eye, a
+    narrowing rewrite) are not §3 failures at all. They are still recorded for the decision
+    log, and the census excludes them rather than inventing a category.
+    """
+
+    # §3, in the SPEC's own order.
+    HALLUCINATED_FILE = "hallucinated_file"  # "hallucinate files"
+    HALLUCINATED_API = "hallucinated_api"  # "hallucinate APIs"
+    INVENTED_FUNCTION = "invented_function"  # "invent functions"
+    INVENTED_LIBRARY = "invented_library"  # "invent libraries"
+    UNSUPPORTED_ASSUMPTION = "unsupported_assumption"  # "make unsupported assumptions"
+    MISREAD_INTENT = "misread_intent"  # "misunderstand developer intent"
+    OVERPLANNED_TRIVIAL = "overplanned_trivial"  # "over-plan trivial tasks"
+    UNDERPLANNED_COMPLEX = "underplanned_complex"  # "under-plan complex tasks"
+    UNNECESSARY_ABSTRACTION = "unnecessary_abstraction"  # "introduce unnecessary abstractions"
+    UNRELATED_FILES_MODIFIED = "unrelated_files_modified"  # "modify unrelated files"
+    UNNECESSARY_DEPENDENCY = "unnecessary_dependency"  # "introduce unnecessary dependencies"
+    IGNORED_REPO_PATTERN = "ignored_repo_pattern"  # "ignore existing repository patterns"
+    OVERLOOKED_REGRESSION = "overlooked_regression"  # "overlook regressions"
+    FALSE_COMPLETION = "false_completion"  # "incorrectly claim that a task is complete"
+    INSUFFICIENT_TESTS = "insufficient_tests"  # "write insufficient tests"
+    UNVERIFIED_CHANGE = "unverified_change"  # "fail to verify their own changes"
+    CONTINUED_ON_BAD_ASSUMPTION = "continued_on_bad_assumption"  # "confidently continue after ..."
+
+    NOT_A_FAILURE = "not_a_failure"
+
+
 class Domain(StrEnum):
     """Engineering domains (SPEC §10, §11).
 

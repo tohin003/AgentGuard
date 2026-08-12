@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from agentguard.core.enums import ClaimKind, Severity, Verdict
+from agentguard.core.enums import ClaimKind, FailureMode, Severity, Verdict
 from agentguard.core.models import EvidenceRef
 from agentguard.evidence.models import Claim, Resolution
 from agentguard.evidence.pyanalysis import SourceFacts
@@ -161,6 +161,7 @@ class Resolver:
             return Resolution(
                 claim=claim,
                 verdict=Verdict.SUPPORTED,
+                failure_mode=FailureMode.NOT_A_FAILURE,
                 severity=Severity.INFO,
                 summary=f"{claim.subject} exists",
                 evidence=[definition] if definition else [],
@@ -170,6 +171,8 @@ class Resolver:
         return Resolution(
             claim=claim,
             verdict=Verdict.CONTRADICTED,
+            # SPEC §3, "hallucinate APIs": a member on a type we fully understand.
+            failure_mode=FailureMode.HALLUCINATED_API,
             severity=Severity.HIGH,
             summary=f"{claim.subject} does not exist",
             detail=(
@@ -368,6 +371,7 @@ class Resolver:
             return Resolution(
                 claim=claim,
                 verdict=Verdict.SUPPORTED,
+                failure_mode=FailureMode.NOT_A_FAILURE,
                 severity=Severity.INFO,
                 summary=f"{module}.{claim.subject} exists",
                 evidence=[EvidenceRef(source="ast", path=target, symbol=claim.subject)],
@@ -383,6 +387,9 @@ class Resolver:
         return Resolution(
             claim=claim,
             verdict=Verdict.CONTRADICTED,
+            # SPEC §3, "invent functions": a name imported from a module of ours that
+            # neither defines nor re-exports it.
+            failure_mode=FailureMode.INVENTED_FUNCTION,
             severity=Severity.HIGH,
             summary=f"`{claim.subject}` is not defined in `{module}`",
             detail=f"{target} does not define or re-export `{claim.subject}`.",
@@ -449,6 +456,19 @@ class Resolver:
         return Resolution(
             claim=claim,
             verdict=Verdict.INSUFFICIENT_EVIDENCE,
+            # Two different SPEC §3 failures wear the same shape here, and the split
+            # follows the evidence rather than a guess. A module under one of *our*
+            # top-level packages that does not resolve is a file that is not there
+            # ("hallucinate files"); anything else is a library we cannot account for
+            # ("invent libraries").
+            #
+            # The second is knowingly imprecise, and it is why that branch is LOW and
+            # never challenged: from inside the repository, an invented library and a
+            # real-but-undeclared one (a transitive dependency, a per-service manifest)
+            # are indistinguishable without knowing which environment will run the file.
+            failure_mode=(
+                FailureMode.HALLUCINATED_FILE if internal_looking else FailureMode.INVENTED_LIBRARY
+            ),
             severity=severity,
             summary=f"`{module}` could not be verified",
             detail=(
@@ -490,6 +510,7 @@ class Resolver:
         return Resolution(
             claim=claim,
             verdict=Verdict.INSUFFICIENT_EVIDENCE,
+            failure_mode=FailureMode.UNNECESSARY_DEPENDENCY,
             severity=Severity.MEDIUM,
             summary=f"`{claim.subject}` is a new dependency",
             detail=(

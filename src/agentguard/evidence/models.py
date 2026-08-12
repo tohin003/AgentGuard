@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 
-from agentguard.core.enums import ClaimKind, Severity, Verdict
+from agentguard.core.enums import ClaimKind, FailureMode, Severity, Verdict
 from agentguard.core.models import EvidenceRef
 
 
@@ -43,6 +43,11 @@ class Resolution:
 
     claim: Claim
     verdict: Verdict
+    # Which SPEC §3 failure this is evidence of. Required rather than defaulted: the
+    # resolver is the only thing that knows *which kind* of absence it just proved, and
+    # a default would let a new resolver drop silently out of the census (Phase 7).
+    # `NOT_A_FAILURE` is the correct, explicit answer for a SUPPORTED resolution.
+    failure_mode: FailureMode
     severity: Severity = Severity.MEDIUM
     summary: str = ""
     detail: str = ""

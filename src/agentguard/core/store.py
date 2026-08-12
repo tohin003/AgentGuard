@@ -54,7 +54,7 @@ from agentguard.core.models import Decision
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Per §6: cap what a single row can hold. A tool argument blob is evidence that an action
 # happened, not a place to archive file contents.
@@ -76,13 +76,17 @@ CREATE TABLE IF NOT EXISTS projects (
     last_seen  REAL NOT NULL
 );
 
+-- Keyed on (id, project_id), not id alone. A session id is unique to the agent that
+-- issued it, not to this database, so a bare `id` primary key means the *second* project
+-- to report a given session id silently loses the row — and the census counts sessions.
 CREATE TABLE IF NOT EXISTS sessions (
-    id         TEXT PRIMARY KEY,
+    id         TEXT NOT NULL,
     project_id TEXT NOT NULL,
     agent      TEXT NOT NULL,
     started_at REAL NOT NULL,
     ended_at   REAL,
-    meta       TEXT NOT NULL DEFAULT '{}'
+    meta       TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (id, project_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, started_at);
 
@@ -122,6 +126,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     session_id TEXT NOT NULL DEFAULT '',
     tool       TEXT,
     action     TEXT NOT NULL,
+    -- In observe-only mode `action` is always 'allow'; `would_have` is what AgentGuard
+    -- would have done. Empty outside observe-only mode.
+    would_have TEXT NOT NULL DEFAULT '',
     reason     TEXT NOT NULL DEFAULT '',
     level      INTEGER NOT NULL DEFAULT 0,
     latency_ms REAL NOT NULL DEFAULT 0,
@@ -137,6 +144,10 @@ CREATE TABLE IF NOT EXISTS findings (
     task_id     TEXT,
     category    TEXT NOT NULL,
     verdict     TEXT NOT NULL,
+    -- Which SPEC §3 failure mode this finding is evidence of. The census counts this
+    -- column; inferring it from (category, verdict) at report time would make the
+    -- taxonomy a guess made after the fact rather than a claim the detector made.
+    failure_mode TEXT NOT NULL DEFAULT '',
     severity    TEXT NOT NULL,
     subject     TEXT NOT NULL DEFAULT '',
     summary     TEXT NOT NULL DEFAULT '',
@@ -318,11 +329,71 @@ class Database:
         self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
+
+    # -- migration ----------------------------------------------------------------
+
+    # Columns added after a table first shipped. `CREATE TABLE IF NOT EXISTS` is a no-op
+    # on an existing table, so a new column has to be added explicitly or every database
+    # created before this release keeps the old shape and every insert fails.
+    #
+    # Additive only, on purpose. A developer's decision history is not worth risking to a
+    # rename, and every column here has a default that makes old rows readable: an empty
+    # `failure_mode` means "recorded before the census existed", which is the truth.
+    _ADDED_COLUMNS: ClassVar[tuple[tuple[str, str, str], ...]] = (
+        ("findings", "failure_mode", "TEXT NOT NULL DEFAULT ''"),
+        ("decisions", "would_have", "TEXT NOT NULL DEFAULT ''"),
+    )
+
+    def _migrate(self) -> None:
+        """Bring an existing database up to `SCHEMA_VERSION`. Never destructive."""
+        for table, column, declaration in self._ADDED_COLUMNS:
+            existing = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if not existing:
+                continue  # table absent entirely; the schema script just created it
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        self._rekey_sessions()
+
+    def _rekey_sessions(self) -> None:
+        """Widen the sessions primary key from `id` to `(id, project_id)`.
+
+        The only non-additive migration here, and it fixes a real defect: with `id` alone
+        as the key, the second project to report a given session id had its row dropped by
+        `INSERT OR IGNORE` and vanished from every count. Unlikely in production (agents
+        issue UUIDs) but not impossible, and the census divides by this number.
+
+        Copy-and-rename rather than an ALTER, because SQLite cannot change a primary key
+        in place. Failure leaves the old table exactly as it was: an over-strict key
+        under-counts sessions, while a half-finished rebuild loses them, so the old shape
+        is strictly the safer place to stop.
+        """
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions'"
+        ).fetchone()
+        if row is None or "PRIMARY KEY (id, project_id)" in (row["sql"] or ""):
+            return
+
+        try:
+            self._conn.execute("ALTER TABLE sessions RENAME TO sessions_legacy")
+            self._conn.executescript(_SCHEMA)
+            self._conn.execute(
+                "INSERT OR IGNORE INTO sessions(id, project_id, agent, started_at, ended_at, meta) "
+                "SELECT id, project_id, agent, started_at, ended_at, meta FROM sessions_legacy"
+            )
+            self._conn.execute("DROP TABLE sessions_legacy")
+            self._conn.commit()
+        except sqlite3.Error:
+            log.exception("agentguard store: sessions re-key failed; keeping the old table")
+            self._conn.rollback()
+            with contextlib.suppress(sqlite3.Error):
+                self._conn.execute("ALTER TABLE sessions_legacy RENAME TO sessions")
+                self._conn.commit()
 
     @classmethod
     def shared(cls, settings: Settings | None = None) -> Database:
@@ -593,8 +664,8 @@ class ProjectStore:
         now = time.time()
         self.db.write(
             "INSERT OR REPLACE INTO decisions"
-            "(id, project_id, event_id, task_id, session_id, tool, action, reason, level, latency_ms, ts) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "(id, project_id, event_id, task_id, session_id, tool, action, would_have, reason, "
+            " level, latency_ms, ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 decision_id,
                 self.project_id,
@@ -603,6 +674,7 @@ class ProjectStore:
                 event.session_id,
                 event.tool,
                 str(decision.action),
+                str(decision.would_have or ""),
                 decision.reason[:MAX_TEXT_BYTES],
                 int(decision.level),
                 decision.latency_ms,
@@ -612,14 +684,15 @@ class ProjectStore:
         for f in decision.findings:
             self.db.write(
                 "INSERT INTO findings"
-                "(project_id, decision_id, task_id, category, verdict, severity, subject, summary, "
-                " detail, evidence, fingerprint, ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(project_id, decision_id, task_id, category, verdict, failure_mode, severity, "
+                " subject, summary, detail, evidence, fingerprint, ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     self.project_id,
                     decision_id,
                     event.task_id,
                     str(f.category),
                     str(f.verdict),
+                    str(f.failure_mode),
                     str(f.severity),
                     f.subject[:200],
                     f.summary[:500],
@@ -657,6 +730,82 @@ class ProjectStore:
             )
         ]
         return out
+
+    # -- failure-mode census (SPEC §3 · Phase 7) ----------------------------------
+
+    @_safe(default=list)
+    def failure_mode_counts(self, since: float) -> list[dict]:
+        """Observations per SPEC §3 failure mode, since `since`.
+
+        Two counts, because they answer different questions. `occurrences` is how often
+        the detector fired; `tasks` is how many distinct pieces of work were affected.
+        A single stubborn edit retried six times is six occurrences and one task, and
+        reporting only the first would make one bad afternoon look like an epidemic.
+
+        Rows with an empty `failure_mode` predate the census and are excluded — counting
+        them as anything would be inventing data.
+        """
+        rows = self.db.query(
+            "SELECT failure_mode, COUNT(*) AS occurrences, "
+            "       COUNT(DISTINCT COALESCE(task_id, decision_id)) AS tasks, "
+            "       COUNT(DISTINCT fingerprint) AS distinct_subjects, "
+            "       MAX(ts) AS last_seen "
+            "FROM findings WHERE project_id=? AND ts>? AND failure_mode NOT IN ('', ?) "
+            "GROUP BY failure_mode ORDER BY occurrences DESC",
+            (self.project_id, since, "not_a_failure"),
+        )
+        return [dict(r) for r in rows]
+
+    @_safe(default=list)
+    def failure_mode_examples(self, mode: str, since: float, limit: int = 3) -> list[dict]:
+        """A few real observations of one mode, for the report's evidence column."""
+        rows = self.db.query(
+            "SELECT subject, summary, severity, ts FROM findings "
+            "WHERE project_id=? AND ts>? AND failure_mode=? "
+            "GROUP BY fingerprint ORDER BY ts DESC LIMIT ?",
+            (self.project_id, since, mode, limit),
+        )
+        return [dict(r) for r in rows]
+
+    @_safe(default=dict)
+    def activity(self, since: float) -> dict[str, Any]:
+        """The denominators. A count of failures without them is not a rate."""
+
+        def scalar(sql: str, params: tuple) -> int:
+            rows = self.db.query(sql, params)
+            return int(rows[0][0]) if rows else 0
+
+        pid = self.project_id
+        sessions = scalar(
+            "SELECT COUNT(*) FROM sessions WHERE project_id=? AND started_at>?", (pid, since)
+        )
+        observed_sessions = scalar(
+            "SELECT COUNT(*) FROM sessions WHERE project_id=? AND started_at>? "
+            "AND meta LIKE '%\"observe_only\": true%'",
+            (pid, since),
+        )
+        return {
+            "sessions": sessions,
+            "observe_only_sessions": observed_sessions,
+            "tasks": scalar(
+                "SELECT COUNT(*) FROM tasks WHERE project_id=? AND created_at>?", (pid, since)
+            ),
+            "decisions": scalar(
+                "SELECT COUNT(*) FROM decisions WHERE project_id=? AND ts>?", (pid, since)
+            ),
+            "would_have_spoken": scalar(
+                "SELECT COUNT(*) FROM decisions WHERE project_id=? AND ts>? "
+                "AND would_have NOT IN ('', 'allow')",
+                (pid, since),
+            ),
+            "first_seen": (
+                self.db.query(
+                    "SELECT COALESCE(MIN(started_at), 0) FROM sessions "
+                    "WHERE project_id=? AND started_at>?",
+                    (pid, since),
+                )[0][0]
+            ),
+        }
 
     # -- challenge ledger (SPEC §17, §39) -----------------------------------------
 

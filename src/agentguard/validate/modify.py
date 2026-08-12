@@ -26,7 +26,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from agentguard.core.enums import ChallengeCategory, EscalationLevel, Severity, Verdict
+from agentguard.core.enums import (
+    ChallengeCategory,
+    EscalationLevel,
+    FailureMode,
+    Severity,
+    Verdict,
+)
 from agentguard.core.events import AgentEvent
 from agentguard.core.models import EvidenceRef, Finding
 from agentguard.validate import checks
@@ -117,6 +123,9 @@ def finding_for(rewrite: Rewrite, event: AgentEvent) -> Finding:
     return Finding(
         category=ChallengeCategory.RISK,
         verdict=Verdict.SUPPORTED_WITH_RISK,
+        # A narrowing rewrite is a thing AgentGuard did, not a failure the agent made.
+        # SPEC §3 has no entry for it and the census must not invent one.
+        failure_mode=FailureMode.NOT_A_FAILURE,
         severity=Severity.MEDIUM,
         subject="modified command",
         summary=f"AgentGuard narrowed this command: {rewrite.summary}",

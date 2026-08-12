@@ -76,6 +76,26 @@ agentguard why <id>       # the evidence behind one decision
 agentguard db stats       # what is stored, and how much room is left
 ```
 
+### Observe-only, and the failure-mode census
+
+AgentGuard can run as a pure sensor: every check still runs and every finding is still
+recorded, but nothing reaches the agent — no challenges, no completion gate, not even the
+injected planning budget.
+
+```bash
+agentguard observe on     # record everything, say nothing
+# ... a week of ordinary work ...
+agentguard census         # which of SPEC §3's 17 failure modes actually occurred
+agentguard observe off
+```
+
+This exists because the benchmark ([`docs/BENCH-mutation.md`](docs/BENCH-mutation.md))
+found that the failure AgentGuard was best at detecting — hallucinated references — is one
+current models essentially no longer commit. Rather than guess again at which failure to
+target, the census counts. **While observe-only is on, AgentGuard guards nothing**; that is
+the price of measuring an unguarded agent. Method and caveats:
+[`docs/CENSUS.md`](docs/CENSUS.md).
+
 ## License
 
 Apache-2.0

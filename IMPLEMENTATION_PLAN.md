@@ -512,12 +512,29 @@ centred on the one that capability improvements have largely closed.
    homework however capable it is. The Completion Gate is the only mechanism that fired
    *spontaneously* in a real session (Phase 6), catching an agent finishing without tests.
 
-### Phase 7 — Failure-mode census  ⟵ NEXT
-Observe-only mode: run against real work for a week and **count which of SPEC §3's fourteen
-failures actually occur**. All the machinery exists — every decision is already logged.
-Replaces guessing about which problem to solve with data. Cheap, and it directs everything
-after it.
+### Phase 7 — Failure-mode census  ⟵ instrument done 2026-08-13; count pending
+Observe-only mode: run against real work for a week and **count which of SPEC §3's
+~~fourteen~~ seventeen failures actually occur**. All the machinery exists — every decision
+is already logged. Replaces guessing about which problem to solve with data. Cheap, and it
+directs everything after it.
 Exit: a ranked table of observed failure frequencies, published.
+
+**Correction, made while building it: SPEC §3 lists seventeen failure modes.** This
+document said fourteen and so did the phase brief; the source document has seventeen
+bullets. `tests/spec/test_s03_failure_census.py` now parses them out of the SPEC and
+asserts the taxonomy matches verbatim, so the two cannot drift again.
+
+**Built and verified** (`docs/CENSUS.md`): observe-only mode with a single choke point,
+`FailureMode` on every finding, four new detectors (unnecessary dependencies, ignored
+repository patterns, insufficient tests, unverified completion — all recorded, never
+raised), and `agentguard census`. 11 of the 17 modes are instrumented; the other six are
+reported *as uninstrumented*, never as zero.
+
+**Not yet done: the count.** The instrument has no data — the hooks are not installed on
+this machine and the Phase 6 / benchmark runs used isolated homes that no longer exist.
+Producing the table needs `agentguard install claude && agentguard observe on` and a week
+of ordinary work. Filling it from the benchmark corpus instead would measure the task
+author, not the agent.
 
 ### Phase 8 — Promote the Completion Gate; demote the Evidence Engine
 Make verified completion the headline: it is proven, cheap, and "your agent said done and

@@ -92,6 +92,7 @@ def validate(
     path = _edited_path(event, index)
     if path:
         findings.extend(checks.pattern_consistency(event, index, path))
+        findings.extend(checks.dependency_added(event, index, path))
 
     if state is not None:
         findings.extend(checks.scope_creep(state, index))

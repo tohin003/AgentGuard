@@ -628,13 +628,14 @@ class TestChallengeRationing:
         return ChallengeLedger(ProjectStore.for_workspace(tmp_path), ChallengeSettings())
 
     def make_findings(self, n: int, severity: Severity = Severity.HIGH):
-        from agentguard.core.enums import ChallengeCategory
+        from agentguard.core.enums import ChallengeCategory, FailureMode
         from agentguard.core.models import Finding
 
         return [
             Finding(
                 category=ChallengeCategory.EVIDENCE,
                 verdict=Verdict.CONTRADICTED,
+                failure_mode=FailureMode.HALLUCINATED_API,
                 severity=severity,
                 subject=f"Type.method_{i}",
                 summary=f"Type.method_{i} does not exist",

@@ -46,6 +46,9 @@ def to_finding(resolution: Resolution) -> Finding:
     return Finding(
         category=_CATEGORY_BY_KIND.get(str(claim.kind), ChallengeCategory.EVIDENCE),
         verdict=resolution.verdict,
+        # Carried through from the resolver, which is the only layer that knows which
+        # kind of absence it proved (SPEC §3 · Phase 7 census).
+        failure_mode=resolution.failure_mode,
         severity=resolution.severity,
         subject=claim.subject,
         summary=resolution.summary,

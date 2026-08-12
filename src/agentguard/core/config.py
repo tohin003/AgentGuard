@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 ENV_DISABLE = "AGENTGUARD_DISABLE"
 ENV_HOME = "AGENTGUARD_HOME"
+ENV_OBSERVE = "AGENTGUARD_OBSERVE"
 
 
 def agentguard_home() -> Path:
@@ -45,9 +46,18 @@ def workspace_state_dir(workspace: str | Path) -> Path:
     return Path(workspace).expanduser().resolve() / ".agentguard"
 
 
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def is_globally_disabled() -> bool:
     """Kill switch. When set, every hook path returns 'no decision' immediately."""
-    return os.environ.get(ENV_DISABLE, "").strip().lower() in {"1", "true", "yes", "on"}
+    return _flag(ENV_DISABLE)
+
+
+def is_observe_only() -> bool:
+    """Census mode. Everything is computed and recorded; nothing is ever said."""
+    return _flag(ENV_OBSERVE)
 
 
 def token_path() -> Path:
@@ -173,6 +183,10 @@ class ChallengeSettings(BaseModel):
 
 class Settings(BaseModel):
     enabled: bool = True
+    # Phase 7's census switch. Every engine still runs and every finding is still
+    # recorded; the agent hears none of it (see `core/observe.py`). Off by default —
+    # while it is on, AgentGuard provides no protection at all.
+    observe_only: bool = False
     log_level: str = "INFO"
     daemon: DaemonSettings = Field(default_factory=DaemonSettings)
     latency: LatencyBudget = Field(default_factory=LatencyBudget)
@@ -194,4 +208,6 @@ class Settings(BaseModel):
         settings = cls.model_validate(data)
         if is_globally_disabled():
             settings.enabled = False
+        if is_observe_only():
+            settings.observe_only = True
         return settings

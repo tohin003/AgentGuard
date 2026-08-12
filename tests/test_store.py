@@ -6,7 +6,13 @@ import time
 from pathlib import Path
 
 from agentguard.adapters.claude_code import translate as claude
-from agentguard.core.enums import ChallengeCategory, DecisionAction, Severity, Verdict
+from agentguard.core.enums import (
+    ChallengeCategory,
+    DecisionAction,
+    FailureMode,
+    Severity,
+    Verdict,
+)
 from agentguard.core.models import Decision, EvidenceRef, Finding
 from agentguard.core.store import ProjectStore as Store
 from tests.conftest import pre_tool_use
@@ -48,6 +54,7 @@ class TestDecisions:
         finding = Finding(
             category=ChallengeCategory.EVIDENCE,
             verdict=Verdict.INSUFFICIENT_EVIDENCE,
+            failure_mode=FailureMode.HALLUCINATED_API,
             severity=Severity.HIGH,
             subject="UserRepository.get_active_users",
             summary="Method not found in repository.",

@@ -14,6 +14,7 @@ from agentguard.core.enums import (
     ChallengeCategory,
     DecisionAction,
     EscalationLevel,
+    FailureMode,
     Severity,
     Verdict,
 )
@@ -53,6 +54,10 @@ class Finding(BaseModel):
 
     category: ChallengeCategory
     verdict: Verdict
+    # Which of SPEC §3's documented failure modes this is evidence of. Required, and with
+    # no default on purpose: a detector that cannot say what it is detecting has no place
+    # in a census. `NOT_A_FAILURE` is the honest answer for findings outside the §3 list.
+    failure_mode: FailureMode
     severity: Severity = Severity.MEDIUM
     subject: str = ""
     summary: str = ""
@@ -84,6 +89,11 @@ class Decision(BaseModel):
     updated_arguments: dict[str, Any] | None = None
     additional_context: str | None = None
     decision_id: str = ""
+    # Set only in observe-only mode: the action that *would* have been taken. Without it
+    # the census could count what AgentGuard saw but not what it would have said, and
+    # "how noisy would guarding be here?" is the question that decides whether to turn it
+    # back on. `None` means this decision was the real one.
+    would_have: DecisionAction | None = None
 
     @classmethod
     def allow(cls, level: EscalationLevel = EscalationLevel.DETERMINISTIC) -> Decision:
@@ -92,7 +102,17 @@ class Decision(BaseModel):
 
     @property
     def is_silent(self) -> bool:
-        """True when the developer and the agent see nothing at all."""
+        """True when this decision carries nothing at all — not even an internal note.
+
+        Stronger than "the agent heard nothing", and deliberately so. An ALLOW whose
+        `reason` records why a finding was *not* raised ("below severity threshold") is
+        already invisible to the agent — the adapter drops `reason` on an allow — but it
+        is not nothing, and a property that called it silent would hide the difference.
+
+        For the question that actually matters to a caller, ask the adapter:
+        `translate.from_decision(event, decision, hook) == {}` is the ground truth about
+        what reached the agent, because that dict *is* what reached the agent.
+        """
         return (
             self.action is DecisionAction.ALLOW
             and not self.reason

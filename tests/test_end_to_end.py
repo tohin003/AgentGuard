@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -175,13 +176,23 @@ class TestTheDaemonBindsWhereTheHooksPoint:
             stderr=subprocess.STDOUT,
         )
         try:
+            # Wait for the handshake *and* for the port to actually accept. The daemon
+            # publishes the handshake before uvicorn starts listening — the pre-bind check
+            # proves the port is available, not that the server has claimed it yet — so a
+            # connection issued the instant the file appears can be refused. Observed as
+            # an intermittent ConnectError once the suite grew enough concurrent daemon
+            # startups to widen that gap.
             deadline = time.time() + 20
             handshake = None
             while time.time() < deadline:
                 path = isolated_home / "daemon.json"
-                if path.exists():
+                if handshake is None and path.exists():
                     handshake = json.loads(path.read_text())
-                    break
+                if handshake is not None:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                        probe.settimeout(0.2)
+                        if probe.connect_ex(("127.0.0.1", port)) == 0:
+                            break
                 time.sleep(0.05)
 
             assert handshake is not None, "the daemon never published a handshake"

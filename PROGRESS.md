@@ -3,9 +3,9 @@
 Living status. Updated at the end of every phase.
 Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered AI Agent Reliability & Reasoning Layer.md`
 
-**Current phase:** Phase 7 — **failure-mode census** (benchmark done; it redirected the project — see IMPLEMENTATION_PLAN 'REVISED DIRECTION')
-**Act I goal:** SPEC §50 milestone (Phase 6 real-world validation)
-**Suite:** 372 tests passing · ruff clean
+**Current phase:** Phase 8 — promote the Completion Gate (Phase 7's instrument is built; the census itself needs an observation window)
+**Act I goal:** SPEC §50 milestone (Phase 6 real-world validation) — met
+**Suite:** 441 tests passing · ruff clean
 
 ---
 
@@ -22,8 +22,8 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | 5 | Full Claude Code adapter + install UX | ✅ **done** | all met — see below |
 | 6 | 🔬 First real-world validation (§50 milestone) | ✅ **done** | met — `docs/VALIDATION-phase6.md` |
 | 7a | AgentGuard-Bench | ✅ **done** | `docs/BENCH-mutation.md`, `docs/BENCH-run-01.md` |
-| 7b | **Failure-mode census (observe-only)** | ⬜ **next** | — |
-| 8 | Promote Completion Gate, demote Evidence Engine | ⬜ | — |
+| 7b | **Failure-mode census (observe-only)** | ⚠️ **instrument done** | built + verified; the count needs a week of real work — `docs/CENSUS.md` |
+| 8 | Promote Completion Gate, demote Evidence Engine | ⬜ **next** | — |
 | 9 | Measure proportional planning (§2/§12/§13) | ⬜ | — |
 | 8 | Act II — performance & reliability hardening | ⬜ blocked | — |
 | 9 | Act II — agent interoperability (MCP, Cursor, Codex) | ⬜ blocked | — |
@@ -198,6 +198,64 @@ its tests passed; the fourth was diagnosed by the agent under test.
 S2/S3 show the *system* working, not that AgentGuard caused it. Only the §36 benchmark with
 a control arm can separate those. Act II Phase 12.
 
+## Phase 7b — failure-mode census (observe-only) ⚠️ instrument done, count pending
+
+Full write-up: **`docs/CENSUS.md`**.
+
+| Criterion | Result |
+|---|---|
+| A switch that forces ALLOW while still computing and recording findings | ✅ `agentguard observe on` · `AGENTGUARD_OBSERVE=1` · `observe_only` in config |
+| Detectors for the §3 failures not yet covered | ✅ four: unnecessary dependencies, ignored repo patterns, insufficient tests, unverified completion |
+| Recorded, never raised | ✅ all four sit below the challenge threshold; proved through the real Guard with guarding **on** |
+| `agentguard census` — a ranked table | ✅ ranked by tasks affected, with denominators and per-detector evidence standards |
+| Hot path unchanged | ✅ **0.44 ms p95** observing vs **0.45 ms** guarding; new detectors 0.86 ms / 0.47 ms p95 |
+| A ranked table, **published** | ⬜ **not yet** — the instrument has no data to count. See below. |
+
+**SPEC §3 lists seventeen failure modes, not fourteen.** Both `IMPLEMENTATION_PLAN.md` and
+the phase brief said fourteen; the document has seventeen bullets. A census built on a
+miscount would have silently dropped three of them. The spec-conformance test now parses
+the bullets out of the SPEC document itself and asserts the taxonomy matches them verbatim
+and in order, so the two cannot drift again.
+
+**Why the table is empty, and why that is the honest answer.** The instrument is verified
+end to end — through the real Guard, and through a real daemon over the real installed
+`settings.json` — but AgentGuard's hooks are not currently installed on this machine, and
+the Phase 6 and benchmark runs each used an isolated `AGENTGUARD_HOME` that no longer
+exists. The recorded database holds 2 sessions and 3 decisions. Filling the table from the
+benchmark corpus instead would be worse than leaving it empty: those tasks were *written
+to bait specific failures*, so their frequencies would measure the task author rather than
+the agent.
+
+**Next action is the user's:** `agentguard install claude --global && agentguard observe on`,
+then a week of ordinary work, then `agentguard census`.
+
+**The design rule the report is built around.**
+
+> A mode with no detector is reported as "not instrumented", never as zero.
+
+Six of the seventeen have no deterministic signal. Sorting all seventeen by count would
+file those six next to genuinely rare ones with no way to tell "never happened" from "never
+looked" — the Evidence Engine's own *complete evidence or silence* rule, applied to the
+census's own claims. Reporting an unmeasured zero would repeat this project's original
+mistake in a new form.
+
+**What is instrumented:** 11 of 17. Two of those are explicitly proxies (`over-plan trivial
+tasks` observes over-*execution*; `invent libraries` cannot separate an invented package
+from a real undeclared one), and `census -v` prints what each detector actually proves so a
+number cannot be read as more than it is.
+
+**Observe-only withholds the planning budget too**, not only challenges. Injected context
+steers the agent, and a census of a steered agent measures the steering. The cost is stated
+rather than hidden: while observe-only is on, AgentGuard protects nothing.
+
+**Three defects found while building it.**
+
+| Defect | Consequence |
+|---|---|
+| `sessions.id` was a **global** primary key | The second project to report a given session id had its row dropped by `INSERT OR IGNORE` and vanished from every count — including the census's denominator. Re-keyed to `(id, project_id)` with a guarded rebuild; verified against the real database on this machine |
+| The convention detector was silent on the clearest violation there is | A four-way snake/kebab/camel/pascal classifier made `store.py` "uncommitted" (compatible with snake *and* kebab), so a directory of single-word lowercase modules — the commonest shape in Python — proved no convention and `NewThing.py` passed. Splitting it into two independent questions (is it lowercase? which separator?) fixed it |
+| `test_the_spawned_daemon_uses_the_configured_port` was racy | It waited for the handshake file, but the daemon publishes that *before* uvicorn listens. Failed intermittently once the suite grew enough concurrent daemon startups. Now waits for an actual connect, as the other fixture already did. Reproduced and traced before fixing rather than guessed at |
+
 ## Spec conformance suite
 
 Acceptance tests derived from the SPEC's own worked examples. These are the real
@@ -205,6 +263,7 @@ definition of "it works".
 
 | Test | SPEC § | Status |
 |---|---|---|
+| `test_s03_failure_census` (69 tests) | §3 | ✅ |
 | `test_s06_no_llm` (4 tests) | §6, §46.1 | ✅ |
 | `test_s08_latency_budget` (6 tests) | §8 | ✅ |
 | `test_s12_proportional_planning` (57 tests) | §2, §9, §10, §12, §13, §34 | ✅ |
@@ -219,10 +278,12 @@ definition of "it works".
 ```
 src/agentguard/
 ├── core/
-│   ├── enums.py      SPEC vocabulary — every enum traceable to a section
+│   ├── enums.py      SPEC vocabulary — every enum traceable to a section,
+│   │                 incl. FailureMode: SPEC §3's seventeen failures (§3)
 │   ├── events.py     normalized agent-agnostic AgentEvent (§23)
 │   ├── models.py     EvidenceRef, Finding, Decision (§14, §16, §18)
-│   ├── config.py     settings, daemon bind, token, kill switch
+│   ├── observe.py    observe-only: the one place a decision is silenced (§3 census)
+│   ├── config.py     settings, daemon bind, token, kill switch, observe switch
 │   ├── store.py      Database (shared, maintenance, disk) + ProjectStore (scoped)
 │   │                 projects/sessions/tasks/events/decisions/findings/challenges/
 │   │                 verifications/metrics/memories (§30 · Memory plan)
@@ -267,9 +328,12 @@ src/agentguard/
 │   ├── runners.py    runner detection, test-command recognition, output parsing
 │   ├── static.py     does the changed code still parse?
 │   └── completion_gate.py  PASS / INCOMPLETE / VERIFICATION_FAILED / HUMAN_REVIEW
+├── census/           ── Failure-mode census (§3) ──
+│   ├── taxonomy.py   the seventeen §3 modes, each detector, and what it *proves*
+│   └── report.py     the ranked table — and the refusal to report an unmeasured zero
 ├── daemon/app.py     FastAPI, 127.0.0.1, token auth, handshake file
 └── cli/main.py       install · uninstall · doctor · log · why · index · find-symbol ·
-                      explain · daemon
+                      explain · census · observe · daemon
 ```
 
 Every hook is now live. `user_prompt` runs Intent → Complexity → Planning and injects the
@@ -371,6 +435,27 @@ Gate; `session_end` closes out and runs storage maintenance.
 - **Round-robin across domains when listing what to investigate.** Taking domain concerns
   in order let backend and ML consume every slot and silently drop MLOps — the single-lens
   blindness SPEC §10 exists to prevent.
+- **Never report an unmeasured zero.** "Nothing looks for it" and "it does not happen" are
+  different facts. The census reports uninstrumented failure modes in their own section
+  with the reason there is no detector, because a zero row would be a confident number
+  with nothing behind it — which is exactly the error the benchmark caught the first time.
+- **A detector that cannot name what it detects is not census input.** `Finding.failure_mode`
+  is required with no default, so the taxonomy is a claim each detector makes rather than
+  an inference made at report time, when the context is gone.
+- **Observing must be free; only speaking is rationed.** The Completion Gate now produces
+  its findings *before* loop safety and the per-task cap are applied. Rationing exists so
+  AgentGuard does not nag; letting it also suppress the record would have made long tasks
+  stop being counted part-way through, silently.
+- **Silence is safest when it is a rebuild, not a reset.** `observe.silence()` constructs a
+  fresh ALLOW rather than blanking the fields it knows about, so a new channel added to
+  `Decision` later is silent by default and has to be deliberately let through.
+- **`is_silent` is about the decision; the adapter is about the agent.** An ALLOW carrying
+  an internal note ("below severity threshold") reaches nobody but is not `is_silent`. The
+  ground truth for "did the agent hear anything" is `translate.from_decision(...) == {}`,
+  because that dict *is* what the agent gets.
+- **A convention must be proved before it can be broken.** Five agreeing siblings and
+  unanimity, not a majority. One dissenter means the repository tolerates both, and a
+  house style that is merely popular is not one an agent can be said to have ignored.
 
 - **AgentGuard never returns `permissionDecision: "allow"`.** "allow" bypasses the user's own
   permission rules; a guard that auto-approved would make the system less safe. It can only
@@ -448,3 +533,21 @@ Gate; `session_end` closes out and runs storage maintenance.
   repository, evidence-grounded challenges resolved by the host's own intelligence, verified
   completion, no LLM on AgentGuard's side. Four defects found and fixed; see
   `docs/VALIDATION-phase6.md` including what is still unproven.
+
+### 2026-08-13
+- **Phase 7b — the census instrument is built.** 441 tests, ruff clean. Observe-only mode
+  (`core/observe.py`, one choke point, total silence including the planning budget); a
+  `FailureMode` on every finding, required and undefaulted; four new detectors for §3
+  failures that had none — unnecessary dependencies via manifest diff, ignored repository
+  patterns via naming/placement conventions, insufficient tests, and unverified completion
+  — all recorded and never raised; `agentguard census` ranking observed failures by the
+  tasks they touched, and reporting the six uninstrumented modes as uninstrumented rather
+  than as zero. Schema v3 with an additive migration plus one guarded table rebuild,
+  verified against the real database.
+
+  Counted the failure modes instead of trusting the plan: **there are seventeen, not
+  fourteen**, and a test now asserts the taxonomy against the SPEC document itself.
+
+  **The census itself is not done.** There is no data to count — see the Phase 7b section
+  above for why fabricating it from the benchmark corpus would be worse than an empty
+  table. `docs/CENSUS.md` carries the method, the caveats and the command to start.

@@ -218,6 +218,11 @@ def doctor() -> None:
     _echo(f"  daemon: {settings.daemon.base_url}")
     if not settings.enabled:
         _warn("AgentGuard is DISABLED (AGENTGUARD_DISABLE is set, or config says enabled=false)")
+    elif settings.observe_only:
+        # Worth surfacing here above all: a developer who has forgotten this is on
+        # believes they are guarded and is not. Exactly the failure mode plan D9 exists
+        # to prevent, arrived at from the other direction.
+        _warn("OBSERVE-ONLY is on — findings are recorded but nothing is ever said")
 
     _echo("\nstorage")
     from agentguard.core.store import Database
@@ -524,18 +529,104 @@ def report_cmd(
     )
 
 
+# ---------------------------------------------------------------- census (SPEC §3)
+
+
+@app.command("census")
+def census_cmd(
+    workspace: Path = typer.Option(Path.cwd(), help="Project to report on."),
+    days: int = typer.Option(14, "-d", help="Observation window."),
+    verbose: bool = typer.Option(False, "-v", help="Also show what each detector proves."),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Which of SPEC §3's seventeen failure modes actually occur (Phase 7).
+
+    Ranks observed failures by how many tasks they affected. Modes with no detector are
+    listed separately and never reported as zero — "nothing looks for it" and "it does not
+    happen" are different facts, and only one of them is true here.
+
+    Pair with `agentguard observe on`, which makes AgentGuard record everything and say
+    nothing, so the count describes an unguarded agent.
+    """
+    from agentguard.census import collect, render, render_detectors
+    from agentguard.core.store import ProjectStore
+
+    result = collect(ProjectStore.for_workspace(workspace), days=days)
+
+    if as_json:
+        _echo(json.dumps(result.to_dict(), indent=2, default=str))
+        return
+
+    _echo(render(result))
+    if verbose:
+        _echo()
+        _echo(render_detectors())
+
+
 # ---------------------------------------------------------------- kill switch
 
 
-def _set_enabled(enabled: bool) -> Path:
-    """Persist the on/off flag without disturbing the rest of the config."""
+def _set_flag(key: str, value: bool) -> Path:
+    """Persist a top-level boolean without disturbing the rest of the config."""
     path = agentguard_home() / "config.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    kept = [ln for ln in lines if not ln.strip().startswith("enabled")]
-    body = "\n".join([f"enabled = {'true' if enabled else 'false'}", *kept]).strip() + "\n"
+    kept = [ln for ln in lines if not ln.strip().startswith(key)]
+    body = "\n".join([f"{key} = {'true' if value else 'false'}", *kept]).strip() + "\n"
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def _set_enabled(enabled: bool) -> Path:
+    return _set_flag("enabled", enabled)
+
+
+observe_app = typer.Typer(
+    name="observe",
+    help="Observe-only mode: record everything, say nothing (SPEC §3 census).",
+    no_args_is_help=True,
+)
+app.add_typer(observe_app)
+
+
+@observe_app.command("on")
+def observe_on() -> None:
+    """Turn AgentGuard into a sensor.
+
+    Every engine still runs and every finding is still recorded; none of it reaches the
+    agent. No challenges, no completion gate, no injected planning budget — so the
+    failures counted are an *unguarded* agent's, which is the only baseline worth having.
+
+    The cost is not hidden: while this is on, AgentGuard protects nothing.
+    """
+    path = _set_flag("observe_only", True)
+    _ok(f"AgentGuard is OBSERVING ({path})")
+    _warn("guarding is suspended: no challenges, no completion gate, no planning budget")
+    _echo("  restart the daemon to pick this up:  agentguard daemon stop && agentguard daemon start")
+    _echo("  read the results with:               agentguard census")
+    _echo("  for a single session instead, set AGENTGUARD_OBSERVE=1")
+
+
+@observe_app.command("off")
+def observe_off() -> None:
+    """Resume guarding."""
+    _set_flag("observe_only", False)
+    _ok("observe-only is OFF — AgentGuard will speak again")
+    if Settings.load().observe_only:
+        _warn("still observing because AGENTGUARD_OBSERVE is set in this environment")
+    _echo("  restart the daemon to pick this up:  agentguard daemon stop && agentguard daemon start")
+
+
+@observe_app.command("status")
+def observe_status() -> None:
+    """Whether AgentGuard is currently allowed to speak."""
+    settings = Settings.load()
+    if not settings.enabled:
+        _warn("AgentGuard is OFF entirely — nothing is computed or recorded")
+    elif settings.observe_only:
+        _ok("observe-only: recording findings, saying nothing")
+    else:
+        _ok("guarding: challenges, completion gate and planning budget are live")
 
 
 @app.command("off")
