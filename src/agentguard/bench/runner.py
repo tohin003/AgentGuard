@@ -66,11 +66,10 @@ def run_once(task: BenchTask, repo: Path, arm: str, settings: Path, timeout: int
 
     duration = time.perf_counter() - started
     changed = task_module.changed_files(repo)
-    expected = set(task.expected_files)
 
     outcome = Outcome(
         hallucinated_refs=task_module.count_hallucinated_refs(repo, task.bait_symbols),
-        unnecessary_files=len({c for c in changed if c not in expected and not c.startswith("tests/")}),
+        unnecessary_files=task_module.count_unrelated_files(repo, changed, task.expected_files),
         files_changed=len(changed),
         duration_s=round(duration, 1),
     )
