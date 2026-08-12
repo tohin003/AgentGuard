@@ -197,7 +197,13 @@ def render(census: Census) -> str:
         add("  nothing — no instrumented failure mode was observed in this window")
     add("")
 
-    add("instrumented, never observed")
+    # "Never observed" claims we looked. With nothing recorded we did not, and saying
+    # otherwise is the same overstatement as printing a zero for an uninstrumented mode.
+    add(
+        "instrumented, never observed"
+        if census.has_data
+        else "instrumented — but there was nothing to observe"
+    )
     if census.silent:
         for spec in census.silent:
             add(f"  · {spec.spec_text}")

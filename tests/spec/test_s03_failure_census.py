@@ -958,6 +958,17 @@ class TestTheCensusReport:
         assert "no recorded activity" in text
         assert len(census.silent) + len(census.uninstrumented) == 17
 
+    def test_an_empty_project_does_not_claim_to_have_looked(self, repo):
+        """"Never observed" asserts that we looked and saw nothing. With no recorded
+        activity we did not look, and saying otherwise is the same overstatement as
+        printing a zero for a mode nothing detects."""
+        text = render(collect(ProjectStore.for_workspace(repo), days=1))
+        assert "instrumented — but there was nothing to observe" in text
+        assert "instrumented, never observed" not in text
+
+    def test_a_populated_project_does_say_it_looked(self, populated):
+        assert "instrumented, never observed" in render(populated)
+
     def test_the_json_shape_is_complete(self, populated):
         payload = populated.to_dict()
         assert set(payload) >= {
