@@ -14,6 +14,7 @@ removes Python interpreter startup (30-80ms) from every single tool call. Bindin
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -26,26 +27,49 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from agentguard.adapters.claude_code import translate as claude
 from agentguard.core.config import (
+    DaemonSettings,
     Settings,
     agentguard_home,
     daemon_handshake_path,
+    ensure_private_dir,
     get_or_create_token,
+    write_private_text,
 )
 from agentguard.core.engine import Guard
 from agentguard.core.metrics import METRICS
+from agentguard.daemon.lifecycle import handshake_lock_path, interprocess_lock
 
 log = logging.getLogger(__name__)
 
 ADAPTERS = {"claude-code": claude}
+MAX_HOOK_BODY_BYTES = 1_000_000
+MAX_HEALTH_BODY_BYTES = 64_000
+
+
+def _safe_endpoint(host: Any, port: Any) -> tuple[str, int] | None:
+    """Accept only the daemon's loopback IPv4 endpoint from a handshake file."""
+    if not isinstance(host, str) or host.strip().lower() == "localhost":
+        host = "127.0.0.1"
+    try:
+        address = ipaddress.ip_address(str(host).strip())
+        port_number = int(port)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(address, ipaddress.IPv4Address) or not address.is_loopback:
+        return None
+    if not 0 < port_number <= 65535:
+        return None
+    return str(address), port_number
 
 
 def write_handshake(host: str, port: int, token: str) -> Path:
     """Publish how to reach the daemon. 0600: the token is a local credential."""
+    ensure_private_dir()
     path = daemon_handshake_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "host": host,
         "port": port,
@@ -54,26 +78,59 @@ def write_handshake(host: str, port: int, token: str) -> Path:
         "started_at": time.time(),
         "version": 1,
     }
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
+    # Serialize publication with shutdown cleanup. Without this, an older daemon can
+    # finish shutting down after a replacement has published its handshake and unlink
+    # the replacement's credentials.
+    with interprocess_lock(handshake_lock_path(agentguard_home()), timeout=2.0) as locked:
+        if not locked:
+            raise RuntimeError("could not claim the daemon handshake lock")
+        write_private_text(path, json.dumps(payload, indent=2))
     return path
 
 
 def read_handshake() -> dict[str, Any] | None:
+    try:
+        # Validate the full home path before reading credentials.  A symlinked parent
+        # can otherwise redirect a seemingly safe daemon.json to another directory.
+        ensure_private_dir()
+    except (OSError, RuntimeError):
+        return None
     path = daemon_handshake_path()
+    if path.is_symlink():
+        return None
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        if path.stat().st_size > MAX_HEALTH_BODY_BYTES:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
     except (json.JSONDecodeError, OSError):
         return None
 
 
-def clear_handshake() -> None:
-    with contextlib.suppress(OSError):
-        daemon_handshake_path().unlink(missing_ok=True)
+def clear_handshake(expected_pid: int | None = None, expected_token: str | None = None) -> None:
+    """Remove the handshake, optionally only when it still belongs to this daemon.
+
+    Shutdown is racy by nature: a supervisor may start a replacement before the old
+    process has finished unwinding.  Matching both PID and token prevents the old
+    process from deleting the replacement's handshake.  The lock closes the remaining
+    read/replace/unlink window with :func:`write_handshake`.
+    """
+    path = daemon_handshake_path()
+    with interprocess_lock(handshake_lock_path(agentguard_home()), timeout=2.0) as locked:
+        if not locked:
+            return
+        if expected_pid is not None or expected_token is not None:
+            current = read_handshake()
+            if not current:
+                return
+            if expected_pid is not None and current.get("pid") != expected_pid:
+                return
+            if expected_token is not None and current.get("token") != expected_token:
+                return
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
 
 
 def daemon_is_alive() -> bool:
@@ -110,18 +167,19 @@ def _health_reports(hs: dict[str, Any], pid: int) -> bool:
     """
     import http.client
 
+    endpoint = _safe_endpoint(hs.get("host", "127.0.0.1"), hs.get("port"))
+    if endpoint is None:
+        return False
     try:
-        conn = http.client.HTTPConnection(
-            str(hs.get("host", "127.0.0.1")), int(hs["port"]), timeout=1.0
-        )
-    except (KeyError, TypeError, ValueError):
+        conn = http.client.HTTPConnection(*endpoint, timeout=1.0)
+    except (TypeError, ValueError):
         return False
     try:
         conn.request("GET", "/health")
         response = conn.getresponse()
         if response.status != 200:
             return False
-        body = json.loads(response.read().decode("utf-8", "replace"))
+        body = json.loads(response.read(MAX_HEALTH_BODY_BYTES).decode("utf-8", "replace"))
         return isinstance(body, dict) and body.get("pid") == pid
     except Exception:  # noqa: BLE001 - unreachable or not ours: either way, not alive
         return False
@@ -180,7 +238,21 @@ def create_app(token: str, settings: Settings | None = None, guard: Guard | None
             return JSONResponse({}, status_code=200)
 
         try:
-            payload = await request.json()
+            content_length = request.headers.get("content-length")
+            if content_length is not None and int(content_length) > MAX_HOOK_BODY_BYTES:
+                return JSONResponse({}, status_code=200)
+        except (TypeError, ValueError):
+            return JSONResponse({}, status_code=200)
+
+        try:
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_HOOK_BODY_BYTES:
+                    return JSONResponse({}, status_code=200)
+                chunks.append(chunk)
+            payload = json.loads(b"".join(chunks))
         except Exception:  # noqa: BLE001 - fail open: unreadable body means "no decision"
             return JSONResponse({}, status_code=200)
 
@@ -191,7 +263,12 @@ def create_app(token: str, settings: Settings | None = None, guard: Guard | None
             event = adapter.to_event(payload)
             if event is None:
                 return JSONResponse({}, status_code=200)
-            decision = app.state.guard.handle(event)
+            # Guard.handle performs synchronous indexing, AST and SQLite work. Running it
+            # directly in this async route would stall health checks and every other hook
+            # whenever one repository refresh is slow. The Guard serializes state per
+            # workspace, so moving it to a worker preserves ordering without blocking the
+            # event loop.
+            decision = await run_in_threadpool(app.state.guard.handle, event)
             out = adapter.from_decision(event, decision, payload.get("hook_event_name", ""))
             return JSONResponse(out, status_code=200)
         except Exception:
@@ -220,32 +297,41 @@ def run(host: str | None = None, port: int | None = None, log_level: str = "warn
     settings = Settings.load()
     host = host if host is not None else settings.daemon.host
     port = port if port is not None else settings.daemon.port
+    try:
+        # Port 0 is useful only for an explicitly foregrounded test process. It must not
+        # be accepted from persisted Settings, because an installed hook cannot point at
+        # an ephemeral port that changes on every restart.
+        ephemeral = port == 0
+        endpoint = DaemonSettings(host=host, port=1 if ephemeral else port)
+    except Exception as exc:  # invalid config must fail before binding
+        sys.stderr.write(f"agentguard: invalid daemon endpoint ({exc})\n")
+        raise SystemExit(2) from exc
+    host = endpoint.host
+    if not ephemeral:
+        port = endpoint.port
     token = get_or_create_token()
 
-    if port == 0:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, 0))
-            port = s.getsockname()[1]
-    else:
-        # Confirm the port is actually available *before* publishing the handshake.
-        # Publishing first meant a daemon that could not bind still advertised itself,
-        # and for the moment before it died, clients saw a live pid and a port that
-        # refused connections — a failure that looked like success.
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind((host, port))
-        except OSError as exc:
-            sys.stderr.write(
-                f"agentguard: cannot bind {host}:{port} ({exc}). "
-                "Change [daemon].port in config.toml and re-run `agentguard install claude`.\n"
-            )
-            raise SystemExit(1) from exc
+    # Bind exactly once and retain this socket until uvicorn owns it. A preliminary
+    # check followed by close/bind has a check-then-use race: another process can claim
+    # the port, and port=0 can be replaced by a different ephemeral port.
+    listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_socket.bind((host, port))
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            listen_socket.close()
+        sys.stderr.write(
+            f"agentguard: cannot bind {host}:{port} ({exc}). "
+            "Change [daemon].port in config.toml and re-run `agentguard install claude`.\n"
+        )
+        raise SystemExit(1) from exc
 
+    port = int(listen_socket.getsockname()[1])
     app = create_app(token, settings)
     write_handshake(host, port, token)
 
-    agentguard_home().mkdir(parents=True, exist_ok=True)
+    ensure_private_dir()
     config = uvicorn.Config(app, host=host, port=port, log_level=log_level, access_log=False)
     server = uvicorn.Server(config)
 
@@ -263,6 +349,12 @@ def run(host: str | None = None, port: int | None = None, log_level: str = "warn
             signal.signal(sig, _graceful)
 
     try:
-        server.run()
+        # Keep the socket that was checked above open through uvicorn startup.  A
+        # check-then-close-then-bind sequence leaves a small but real window in which
+        # another process can claim the fixed port (or an ephemeral port can change).
+        # Passing the already-bound socket makes the reservation atomic.
+        server.run(sockets=[listen_socket])
     finally:
-        clear_handshake()
+        with contextlib.suppress(OSError):
+            listen_socket.close()
+        clear_handshake(expected_pid=os.getpid(), expected_token=token)

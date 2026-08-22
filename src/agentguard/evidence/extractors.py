@@ -21,6 +21,7 @@ from agentguard.core.enums import ClaimKind
 from agentguard.core.events import AgentEvent
 from agentguard.evidence import pyanalysis
 from agentguard.evidence.models import Claim
+from agentguard.repo.paths import relative_path
 
 PYTHON_SUFFIXES = (".py", ".pyi")
 
@@ -61,8 +62,18 @@ def resolve_edit(event: AgentEvent, root: Path) -> EditOutcome | None:
     if not isinstance(raw_path, str) or not raw_path:
         return None
 
-    path = _relative(raw_path, root)
+    path = relative_path(root, raw_path)
+    if path is None:
+        return None
+    # Re-check the canonical target immediately before reading.  A symlink can be
+    # swapped between the lexical containment check and ``read_text``; refusing links
+    # here closes that small TOCTOU window for evidence extraction.
     full = root / path
+    try:
+        if not full.resolve(strict=False).is_relative_to(root.resolve(strict=False)):
+            return None
+    except (OSError, RuntimeError):
+        return None
     try:
         before = full.read_text(encoding="utf-8", errors="replace") if full.is_file() else ""
     except OSError:
@@ -110,13 +121,13 @@ def resolve_edit(event: AgentEvent, root: Path) -> EditOutcome | None:
 
 
 def _relative(raw: str, root: Path) -> str:
-    candidate = Path(raw)
-    if candidate.is_absolute():
-        try:
-            return candidate.resolve().relative_to(root.resolve()).as_posix()
-        except ValueError:
-            return candidate.as_posix()
-    return candidate.as_posix().removeprefix("./")
+    """Backward-compatible wrapper for callers/tests that used the old helper.
+
+    Outside paths are represented by an empty string; ``resolve_edit`` uses
+    :func:`relative_path` directly so it can distinguish and reject them before any
+    filesystem access.  Keeping this wrapper avoids breaking private-but-useful imports.
+    """
+    return relative_path(root, raw) or ""
 
 
 def claims_from_edit(outcome: EditOutcome) -> tuple[list[Claim], pyanalysis.SourceFacts | None]:

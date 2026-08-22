@@ -33,6 +33,8 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -42,15 +44,18 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlsplit, urlunsplit
 
 from agentguard.core.config import (
     DiskSettings,
     RetentionSettings,
     Settings,
     database_path,
+    ensure_private_dir,
 )
 from agentguard.core.events import AgentEvent
 from agentguard.core.models import Decision
+from agentguard.repo.gitinfo import repository_root
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +108,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     closed_at   REAL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(project_id, session_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_retention
+    ON tasks(project_id, status, closed_at, created_at);
 
 CREATE TABLE IF NOT EXISTS events (
     id         TEXT PRIMARY KEY,
@@ -171,6 +178,7 @@ CREATE TABLE IF NOT EXISTS challenges (
     last_ts     REAL NOT NULL,
     UNIQUE(project_id, task_id, fingerprint)
 );
+CREATE INDEX IF NOT EXISTS idx_challenges_last_ts ON challenges(project_id, last_ts);
 
 CREATE TABLE IF NOT EXISTS verifications (
     id          TEXT PRIMARY KEY,
@@ -241,6 +249,47 @@ def _git_remote(root: Path) -> str:
     return proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else ""
 
 
+_SCP_REMOTE = re.compile(r"^(?P<user>[^/@:]+)@(?P<host>[^/:]+):(?P<path>.+)$")
+
+
+def sanitize_git_remote(remote: str) -> str:
+    """Return a stable remote identity without embedded credentials.
+
+    Git accepts URLs such as ``https://user:token@example.com/org/repo.git`` and
+    scp-style remotes such as ``git@example.com:org/repo.git``.  The former can leak a
+    password/token into the shared database; the latter's transport username is not
+    useful identity and makes SSH/HTTPS checkouts look different.  Strip userinfo,
+    query strings and fragments while retaining host, optional port and repository path.
+    """
+    raw = remote.strip()
+    if not raw:
+        return ""
+
+    match = _SCP_REMOTE.match(raw)
+    if match:
+        return f"{match.group('host')}:{match.group('path')}"
+
+    try:
+        parsed = urlsplit(raw)
+        if parsed.scheme and parsed.hostname:
+            hostname = parsed.hostname
+            if ":" in hostname and not hostname.startswith("["):
+                hostname = f"[{hostname}]"
+            try:
+                port = f":{parsed.port}" if parsed.port is not None else ""
+            except ValueError:
+                port = ""
+            return urlunsplit((parsed.scheme.lower(), f"{hostname}{port}", parsed.path, "", ""))
+    except ValueError:
+        pass
+
+    # A malformed/unusual remote is still safer with obvious userinfo removed than
+    # persisted verbatim.  Keep the original only when there is no credential marker.
+    if "@" in raw:
+        return raw.rsplit("@", 1)[-1]
+    return raw
+
+
 def project_identity(root: str | Path) -> ProjectIdentity:
     """Stable identity for a repository.
 
@@ -248,8 +297,8 @@ def project_identity(root: str | Path) -> ProjectIdentity:
     as a worktree is still the same project, and its accumulated memory should follow it.
     Falls back to the canonical path outside git.
     """
-    resolved = Path(root).expanduser().resolve()
-    remote = _git_remote(resolved)
+    resolved = repository_root(root)
+    remote = sanitize_git_remote(_git_remote(resolved))
     basis = remote or str(resolved)
     return ProjectIdentity(
         id=hashlib.sha256(basis.encode()).hexdigest()[:16],
@@ -320,21 +369,40 @@ class Database:
         self._last_maintenance = 0.0
         self._writes_disabled = False
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            raise RuntimeError(f"refusing to use symlink as database: {path}")
+        if path.exists() and not path.is_file():
+            raise RuntimeError(f"refusing to use non-regular database path: {path}")
+        ensure_private_dir(self.path.parent)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._harden_file_modes()
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=3000")
         self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._migrate()
+            self._sanitize_project_remotes()
             self._conn.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
+            self._harden_file_modes()
+
+    def _harden_file_modes(self) -> None:
+        """Keep SQLite and its WAL sidecars owner-readable only.
+
+        SQLite creates the database with the process umask, which is commonly ``022``.
+        The database contains prompts, tool arguments and repository metadata, so relying
+        on the caller's umask would make a normal installation world-readable.
+        """
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(f"{self.path}{suffix}")
+            if candidate.exists():
+                os.chmod(candidate, 0o600)
 
     # -- migration ----------------------------------------------------------------
 
@@ -359,6 +427,14 @@ class Database:
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
         self._rekey_sessions()
+
+    def _sanitize_project_remotes(self) -> None:
+        """Remove credentials from project identities written by older releases."""
+        rows = self._conn.execute("SELECT id, git_remote FROM projects WHERE git_remote <> ''").fetchall()
+        for row in rows:
+            clean = sanitize_git_remote(str(row["git_remote"]))
+            if clean != row["git_remote"]:
+                self._conn.execute("UPDATE projects SET git_remote=? WHERE id=?", (clean, row["id"]))
 
     def _rekey_sessions(self) -> None:
         """Widen the sessions primary key from `id` to `(id, project_id)`.
@@ -441,6 +517,19 @@ class Database:
             return False
         return self.disk_state() != "critical"
 
+    @property
+    def database_over_limit(self) -> bool:
+        """Whether the configured database-size budget has been exceeded.
+
+        ``max_database_mb`` is a maintenance budget, not a second fail-closed switch.
+        Reaching it should trigger cleanup, but stopping all writes here would also stop
+        the cleanup that could recover the database.  Critical *filesystem* pressure
+        remains the only condition that disables writes (the reliability guarantee in
+        §8).
+        """
+        limit = self.disk.max_database_mb
+        return limit > 0 and self.size_megabytes() >= limit
+
     # -- primitives ---------------------------------------------------------------
 
     def write(self, sql: str, params: tuple) -> None:
@@ -458,7 +547,7 @@ class Database:
 
     def maintenance_due(self) -> bool:
         interval = self.retention.maintenance_interval_hours * 3600
-        return (time.time() - self._last_maintenance) >= interval
+        return self.database_over_limit or (time.time() - self._last_maintenance) >= interval
 
     @_safe(default=dict)
     def maintain(self, force: bool = False) -> dict[str, int]:
@@ -472,17 +561,19 @@ class Database:
             return {}
         self._last_maintenance = time.time()
 
-        aggressive = self.disk_state() != "healthy"
+        aggressive = self.disk_state() != "healthy" or self.database_over_limit
         removed = self.prune(aggressive=aggressive)
 
         with self._lock:
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             self._conn.execute("PRAGMA incremental_vacuum")
             self._conn.commit()
+            self._harden_file_modes()
 
-        if self.size_megabytes() > self.retention.vacuum_threshold_mb:
+        if self.size_megabytes() > self.retention.vacuum_threshold_mb or self.database_over_limit:
             with self._lock:
                 self._conn.execute("VACUUM")
+                self._harden_file_modes()
         return removed
 
     @_safe(default=dict)
@@ -494,7 +585,6 @@ class Database:
             ("decisions", self.retention.decisions_days, "ts"),
             ("verifications", self.retention.verifications_days, "started_at"),
             ("metrics", self.retention.metrics_days, "ts"),
-            ("sessions", self.retention.session_summaries_days, "started_at"),
         ]
         removed: dict[str, int] = {}
         now = time.time()
@@ -507,11 +597,68 @@ class Database:
                 removed[table] = cursor.rowcount if cursor.rowcount > 0 else 0
                 self._conn.commit()
 
+        # Sessions are summaries, but an active session is not a summary yet. Keep it
+        # (and its open task) even if a daemon happens to run maintenance after a long
+        # uninterrupted session. A crashed session has no ended_at and is treated the
+        # same way; this is safer than deleting the state that lets the next event fail
+        # open without losing attribution.
+        summary_days = self.retention.session_summaries_days
+        if summary_days > 0:
+            cutoff = now - (summary_days * scale * 86400)
+            with self._lock:
+                cursor = self._conn.execute(
+                    "DELETE FROM sessions WHERE started_at < ? AND ended_at IS NOT NULL",
+                    (cutoff,),
+                )
+                removed["sessions"] = cursor.rowcount if cursor.rowcount > 0 else 0
+
+                # Closed tasks are session-level summaries too. Also remove old tasks
+                # whose session summary has already disappeared (or was never recorded
+                # because persistence was unavailable). Open tasks survive unless their
+                # session is definitively gone and the task itself is old.
+                cursor = self._conn.execute(
+                    "DELETE FROM tasks WHERE "
+                    "(status <> 'open' AND COALESCE(closed_at, created_at) < ?) OR "
+                    "(status = 'open' AND created_at < ? AND NOT EXISTS ("
+                    "  SELECT 1 FROM sessions s WHERE s.id=tasks.session_id "
+                    "  AND s.project_id=tasks.project_id"
+                    "))",
+                    (cutoff, cutoff),
+                )
+                removed["tasks"] = cursor.rowcount if cursor.rowcount > 0 else 0
+                self._conn.commit()
+        else:
+            # Keep the keys stable for callers (CLI/reporting) while honoring the
+            # documented `0 means keep indefinitely` retention setting.
+            removed["sessions"] = 0
+            removed["tasks"] = 0
+
+        # Challenges have no independent retention setting: they are useful only as
+        # part of a task summary. Remove challenges attached to tasks deleted above and
+        # orphan rows left by an interrupted write. A challenge without its task cannot
+        # participate in rationing, so retaining it would only consume storage.
+        removed["challenges"] = 0
+        with self._lock:
+            # Include project_id in the join: task ids are normally UUIDs, but callers
+            # and older databases may contain human-readable ids reused across projects.
+            # A bare `task_id NOT IN (...)` cleanup would violate project isolation.
+            cursor = self._conn.execute(
+                "DELETE FROM challenges WHERE NOT EXISTS ("
+                "  SELECT 1 FROM tasks t WHERE t.id=challenges.task_id "
+                "  AND t.project_id=challenges.project_id"
+                ")"
+            )
+            removed["challenges"] += max(cursor.rowcount, 0)
+            self._conn.commit()
+
         # Findings belong to decisions; a finding whose decision is gone is unreadable.
         # Violations worth keeping are promoted to `memories` in Phase 9.
         with self._lock:
             cursor = self._conn.execute(
-                "DELETE FROM findings WHERE decision_id NOT IN (SELECT id FROM decisions)"
+                "DELETE FROM findings AS f WHERE NOT EXISTS ("
+                "  SELECT 1 FROM decisions d WHERE d.id=f.decision_id "
+                "  AND d.project_id=f.project_id"
+                ")"
             )
             removed["findings"] = max(cursor.rowcount, 0)
             self._conn.commit()
@@ -519,7 +666,14 @@ class Database:
 
     def size_megabytes(self) -> float:
         try:
-            return self.path.stat().st_size / (1024 * 1024)
+            # WAL mode keeps recent writes in sidecar files. Measuring only the main
+            # database made `max_database_mb` appear ineffective precisely while the
+            # WAL was carrying the bulk of the data.
+            total = 0
+            for suffix in ("", "-wal", "-shm"):
+                with contextlib.suppress(OSError):
+                    total += Path(f"{self.path}{suffix}").stat().st_size
+            return total / (1024 * 1024)
         except OSError:
             return 0.0
 
@@ -538,6 +692,8 @@ class Database:
             "free_disk_mb": round(self.free_megabytes(), 1),
             "disk_state": self.disk_state(),
             "writes_enabled": self.writes_enabled,
+            "database_over_limit": self.database_over_limit,
+            "max_database_mb": self.disk.max_database_mb,
             "rows": counts,
         }
 
@@ -581,6 +737,8 @@ class ProjectStore:
     def open_session(
         self, session_id: str, agent: str, workspace: str = "", meta: dict | None = None
     ) -> None:
+        if not session_id:
+            return
         self.db.write(
             "INSERT OR IGNORE INTO sessions(id, project_id, agent, started_at, meta) VALUES(?,?,?,?,?)",
             (session_id, self.project_id, agent, time.time(), json.dumps(meta or {})[:MAX_TEXT_BYTES]),
@@ -588,10 +746,27 @@ class ProjectStore:
 
     @_safe()
     def close_session(self, session_id: str) -> None:
-        self.db.write(
-            "UPDATE sessions SET ended_at=? WHERE id=? AND project_id=?",
-            (time.time(), session_id, self.project_id),
-        )
+        ended_at = time.time()
+        # Closing a session is the durable lifecycle boundary for its tasks. Without
+        # this update every prompt-created task stayed `open` forever, so retention could
+        # never reclaim task/challenge rows and `current_task_id()` kept seeing stale work
+        # after a clean SessionEnd. Keep both writes in one transaction where possible;
+        # the public wrapper still fails open if storage is unavailable.
+        # An empty adapter session id is an unscoped event, not a session handle. Never
+        # let SessionEnd for such a payload close every anonymous task in the project.
+        if not session_id or not self.db.writes_enabled:
+            return
+        with self.db._lock:
+            self.db._conn.execute(
+                "UPDATE sessions SET ended_at=? WHERE id=? AND project_id=?",
+                (ended_at, session_id, self.project_id),
+            )
+            self.db._conn.execute(
+                "UPDATE tasks SET status='closed', closed_at=? "
+                "WHERE project_id=? AND session_id=? AND status='open'",
+                (ended_at, self.project_id, session_id),
+            )
+            self.db._conn.commit()
 
     # -- tasks --------------------------------------------------------------------
 
@@ -604,6 +779,8 @@ class ProjectStore:
         complexity: float | None = None,
         depth: str | None = None,
     ) -> str:
+        if not session_id:
+            return ""
         task_id = uuid.uuid4().hex
         self.db.write(
             "INSERT INTO tasks(id, project_id, session_id, prompt, spec, complexity, depth, created_at) "

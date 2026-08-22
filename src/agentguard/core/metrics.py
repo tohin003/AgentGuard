@@ -107,5 +107,11 @@ class Timer:
     def __exit__(self, *exc: object) -> None:
         self.ms = (time.perf_counter() - self._start) * 1000.0
 
+    def elapsed_ms(self) -> float:
+        """Return the current elapsed time while the context is still open."""
+        if not self._start:
+            return self.ms
+        return (time.perf_counter() - self._start) * 1000.0
+
 
 METRICS = Metrics()

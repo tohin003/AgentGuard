@@ -40,6 +40,21 @@ def is_git_repo(root: Path) -> bool:
     return _git(root, "rev-parse", "--git-dir") is not None
 
 
+def repository_root(path: str | Path) -> Path:
+    """Return the containing Git worktree root, or the canonical input path.
+
+    Claude Code's ``cwd`` is the directory where the session was launched, which may be
+    a subdirectory of a repository. Keeping that subdirectory as the index root creates
+    duplicate project state and makes sibling files invisible. Git is the authoritative
+    source when available; non-Git workspaces retain their existing behavior.
+    """
+    candidate = Path(path).expanduser().resolve()
+    top = _git(candidate, "rev-parse", "--show-toplevel")
+    if top:
+        return Path(top.strip()).expanduser().resolve()
+    return candidate
+
+
 def read_state(root: Path) -> GitState:
     state = GitState()
     if _git(root, "rev-parse", "--git-dir") is None:
@@ -54,14 +69,33 @@ def read_state(root: Path) -> GitState:
 
     status = _git(root, "status", "--porcelain=v1", "-z")
     if status:
-        for entry in status.split("\0"):
+        entries = status.split("\0")
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            index += 1
             if len(entry) < 4:
                 continue
             code, path = entry[:2], entry[3:]
             if code == "??":
                 state.untracked.add(path)
-            else:
+                # ``dirty`` is the complete set of paths whose worktree state differs
+                # from HEAD.  Keep the narrower ``untracked`` subset as well, but do not
+                # make callers union two collections just to notice the destination of
+                # an unstaged rename (which Git reports as deleted + untracked).
                 state.dirty.add(path)
+                continue
+
+            state.dirty.add(path)
+            # With ``-z``, rename/copy records contain the destination in the first
+            # record and the source in the following record. Keep both names: callers
+            # asking what changed should not lose the old path merely because Git
+            # recognized a rename.
+            if (code[0] in "RC" or code[1] in "RC") and index < len(entries):
+                previous = entries[index]
+                index += 1
+                if previous:
+                    state.dirty.add(previous)
 
     log = _git(root, "log", f"-{_RECENT_COMMITS}", "--format=%H%x1f%ct%x1f%s")
     if log:

@@ -67,6 +67,12 @@ def hook_for(config: dict, event: str) -> dict:
     return next(h for h in hooks if h["type"] == "http")
 
 
+def command_hook_for(config: dict, event: str) -> dict:
+    """Return the command hook exactly as Claude Code receives it."""
+    hooks = config["hooks"][event][0]["hooks"]
+    return next(h for h in hooks if h["type"] == "command")
+
+
 def fire(hook: dict, payload: dict) -> httpx.Response:
     """Do what Claude Code does with an `http` hook entry."""
     return httpx.post(
@@ -241,12 +247,15 @@ class TestFailOpenInProduction:
         proc.kill()
         proc.wait(timeout=5)
 
-        hook = config["hooks"]["SessionStart"][0]["hooks"][0]
+        hook = command_hook_for(config, "SessionStart")
         assert hook["type"] == "command"
+        assert "args" not in hook
 
         env = dict(os.environ, AGENTGUARD_HOME=str(isolated_home), PYTHONPATH=str(REPO_ROOT / "src"))
         result = subprocess.run(
-            [hook["command"], *hook["args"]],
+            hook["command"],
+            shell=True,
+            executable="/bin/sh",
             input=json.dumps(session_start(cwd=str(workspace))).encode(),
             capture_output=True,
             env=env,

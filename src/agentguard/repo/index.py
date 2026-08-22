@@ -41,6 +41,7 @@ from agentguard.repo.models import (
     ImportRecord,
     SymbolRecord,
 )
+from agentguard.repo.paths import relative_path
 
 log = logging.getLogger(__name__)
 
@@ -150,7 +151,9 @@ class RepoIndex:
         because it re-stats every file; this costs ~1ms, and PostToolUse already tells
         us precisely which file changed.
         """
-        rel = self.normalize(path)
+        rel = relative_path(self.root, path)
+        if rel is None:
+            return False
         full = self.root / rel
         with self._lock:
             if not full.is_file():
@@ -224,8 +227,18 @@ class RepoIndex:
     def _parse(self, path: str, record: FileRecord) -> ParsedFile:
         if not record.parsable:
             return ParsedFile()
+        # ``scan`` normally enforces this, but keep the parser defensive because callers
+        # can refresh or construct records independently.  In particular, a symlinked
+        # file must never make the evidence layer read outside the workspace.
+        if relative_path(self.root, path) is None:
+            return ParsedFile()
         try:
-            source = (self.root / path).read_text(encoding="utf-8", errors="replace")
+            full = self.root / path
+            if not full.resolve(strict=False).is_relative_to(
+                self.root.resolve(strict=False)
+            ):
+                return ParsedFile()
+            source = full.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return ParsedFile()
 
@@ -389,13 +402,10 @@ class RepoIndex:
 
     def normalize(self, path: str) -> str:
         """Accept absolute paths, ./-prefixed paths and repo-relative paths alike."""
-        candidate = Path(path)
-        if candidate.is_absolute():
-            try:
-                return str(candidate.resolve().relative_to(self.root).as_posix())
-            except ValueError:
-                return path
-        return str(Path(path).as_posix()).removeprefix("./")
+        # Keep the historical string-returning API.  Invalid/outside paths become the
+        # empty sentinel; callers use it as "not a repository path" and no caller can
+        # accidentally turn an absolute path back into a filesystem read.
+        return relative_path(self.root, path) or ""
 
     def find_symbol(self, name: str) -> list[SymbolRecord]:
         """Match on bare name or fully-qualified name."""

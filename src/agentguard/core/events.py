@@ -13,7 +13,7 @@ import time
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from agentguard.core.enums import EventType
 
@@ -53,6 +53,11 @@ class AgentEvent(BaseModel):
 
     event_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     ts: float = Field(default_factory=time.time)
+
+    # Internal routing state.  A rejected explicit task id is intentionally cleared
+    # before persistence, but must not become indistinguishable from an event that never
+    # carried a task id: the latter may resolve to the session's current task.
+    _task_id_rejected: bool = PrivateAttr(default=False)
 
     @property
     def is_read_only(self) -> bool:

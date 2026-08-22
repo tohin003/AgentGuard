@@ -16,7 +16,13 @@ from pathlib import Path
 
 import typer
 
-from agentguard.core.config import Settings, agentguard_home, get_or_create_token
+from agentguard.core.config import (
+    Settings,
+    agentguard_home,
+    ensure_private_dir,
+    get_or_create_token,
+    write_private_text,
+)
 
 app = typer.Typer(
     name="agentguard",
@@ -63,33 +69,42 @@ def daemon_run(
 def daemon_start(timeout: float = typer.Option(10.0, help="Seconds to wait for readiness.")) -> None:
     """Start the daemon in the background."""
     from agentguard.daemon.app import daemon_is_alive, read_handshake
-
-    if daemon_is_alive():
-        hs = read_handshake() or {}
-        _echo(f"already running (pid {hs.get('pid')}) on {hs.get('host')}:{hs.get('port')}")
-        raise typer.Exit(0)
+    from agentguard.daemon.lifecycle import interprocess_lock, open_private_append, startup_lock_path
 
     home = agentguard_home()
-    home.mkdir(parents=True, exist_ok=True)
-    log_file = open(home / "daemon.log", "ab")  # noqa: SIM115 - handed to the child process
-    subprocess.Popen(
-        [sys.executable, "-m", "agentguard.daemon", "run"],
-        stdout=log_file,
-        stderr=log_file,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    with interprocess_lock(startup_lock_path(home), timeout=timeout) as locked:
+        if not locked:
+            _bad(f"could not acquire the daemon startup lock within {timeout}s")
+            raise typer.Exit(1)
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
         if daemon_is_alive():
             hs = read_handshake() or {}
-            _echo(f"started (pid {hs.get('pid')}) on {hs.get('host')}:{hs.get('port')}")
+            _echo(f"already running (pid {hs.get('pid')}) on {hs.get('host')}:{hs.get('port')}")
             raise typer.Exit(0)
-        time.sleep(0.05)
 
-    _bad(f"daemon did not become ready within {timeout}s — see {home / 'daemon.log'}")
-    raise typer.Exit(1)
+        home.mkdir(parents=True, exist_ok=True)
+        log_file = open_private_append(home / "daemon.log")
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "agentguard.daemon", "run"],
+                stdout=log_file,
+                stderr=log_file,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        finally:
+            log_file.close()
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if daemon_is_alive():
+                hs = read_handshake() or {}
+                _echo(f"started (pid {hs.get('pid')}) on {hs.get('host')}:{hs.get('port')}")
+                raise typer.Exit(0)
+            time.sleep(0.05)
+
+        _bad(f"daemon did not become ready within {timeout}s — see {home / 'daemon.log'}")
+        raise typer.Exit(1)
 
 
 @daemon_app.command("stop")
@@ -97,26 +112,51 @@ def daemon_stop() -> None:
     """Stop the daemon."""
     import signal
 
+    from agentguard.core.config import agentguard_home
     from agentguard.daemon.app import clear_handshake, daemon_is_alive, read_handshake
+    from agentguard.daemon.lifecycle import handshake_lock_path, interprocess_lock
 
-    if not daemon_is_alive():
-        _echo("not running")
-        clear_handshake()
+    # Hold the handshake lock across the final liveness check and SIGTERM. This closes
+    # the race where an old snapshot is read, a replacement publishes a new handshake,
+    # and `stop` accidentally signals the wrong PID. Release before waiting for the old
+    # process to unwind: its shutdown handler needs the same lock to clear its record.
+    stale_to_clear: dict[str, object] | None = None
+    with interprocess_lock(handshake_lock_path(agentguard_home()), timeout=2.0) as locked:
+        if not locked:
+            _bad("could not acquire the daemon handshake lock")
+            raise typer.Exit(1)
+        hs = read_handshake() or {}
+        if not hs:
+            _echo("not running")
+            raise typer.Exit(0)
+        if not daemon_is_alive():
+            _echo("not running")
+            # A stale record is safe to remove only while its PID/token still match the
+            # record we inspected. With no record, leave the filesystem untouched.
+            stale_to_clear = hs
+        else:
+            pid = hs.get("pid")
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except (OSError, TypeError, ValueError) as exc:
+                _bad(f"could not stop pid {pid}: {exc}")
+                raise typer.Exit(1) from exc
+
+    if stale_to_clear:
+        clear_handshake(
+            expected_pid=stale_to_clear.get("pid"),
+            expected_token=stale_to_clear.get("token"),
+        )
         raise typer.Exit(0)
-
-    hs = read_handshake() or {}
-    pid = hs.get("pid")
-    try:
-        os.kill(int(pid), signal.SIGTERM)
-    except (OSError, TypeError, ValueError) as exc:
-        _bad(f"could not stop pid {pid}: {exc}")
-        raise typer.Exit(1) from exc
 
     for _ in range(60):
         if not daemon_is_alive():
             break
         time.sleep(0.05)
-    clear_handshake()
+    if daemon_is_alive():
+        _bad(f"daemon did not stop within 3s (pid {pid}); handshake left intact")
+        raise typer.Exit(1)
+    clear_handshake(expected_pid=pid, expected_token=hs.get("token"))
     _echo(f"stopped (pid {pid})")
 
 
@@ -150,7 +190,11 @@ def install_cmd(
 
     from agentguard.adapters.claude_code import install as inst
 
-    path = inst.project_settings_path() if project and not global_ else inst.global_settings_path()
+    try:
+        path = inst.settings_path(project=project, global_=global_)
+    except ValueError as exc:
+        _bad(str(exc))
+        raise typer.Exit(2) from exc
 
     try:
         result, changed = inst.install(path, dry_run=dry_run)
@@ -181,10 +225,19 @@ def uninstall_cmd(
     """Detach AgentGuard, leaving any hooks you wrote yourself untouched."""
     from agentguard.adapters.claude_code import install as inst
 
-    path = inst.project_settings_path() if project and not global_ else inst.global_settings_path()
-    _, changed = inst.uninstall(path, dry_run=dry_run)
+    try:
+        path = inst.settings_path(project=project, global_=global_)
+        result, changed = inst.uninstall(path, dry_run=dry_run)
+    except (RuntimeError, ValueError) as exc:
+        _bad(str(exc))
+        raise typer.Exit(1 if isinstance(exc, RuntimeError) else 2) from exc
     _echo(f"settings file: {path}")
-    _ok("hooks removed" if changed else "nothing to remove")
+    if dry_run:
+        if changed:
+            _echo(json.dumps(result.get("hooks", {}), indent=2))
+        _warn("dry run — nothing written")
+    else:
+        _ok("hooks removed" if changed else "nothing to remove")
 
 
 # ---------------------------------------------------------------- diagnostics
@@ -216,6 +269,9 @@ def doctor() -> None:
     _echo("\nconfig")
     _echo(f"  home: {agentguard_home()}")
     _echo(f"  daemon: {settings.daemon.base_url}")
+    if settings.config_warning:
+        _warn(f"using safe defaults because {settings.config_warning}")
+        problems += 1
     if not settings.enabled:
         _warn("AgentGuard is DISABLED (AGENTGUARD_DISABLE is set, or config says enabled=false)")
     elif settings.observe_only:
@@ -228,6 +284,9 @@ def doctor() -> None:
     from agentguard.core.store import Database
 
     stats = Database.shared().stats()
+    if settings.config_warning:
+        _bad(settings.config_warning)
+        problems += 1
     _echo(f"  {stats['path']}  ({stats['size_mb']} MB)")
     if stats["disk_state"] == "healthy":
         _ok(f"{stats['free_disk_mb']:.0f} MB free")
@@ -261,6 +320,14 @@ def doctor() -> None:
             _ok(f"{label} hooks installed ({path})")
         else:
             _echo(f"  · {label} hooks not installed ({path})")
+
+    installed_anywhere = any(
+        inst.is_installed(path)
+        for path in (inst.global_settings_path(), inst.project_settings_path())
+    )
+    if not installed_anywhere:
+        _bad("no Claude Code hooks installed — this project is currently unguarded")
+        problems += 1
 
     _echo()
     if problems:
@@ -567,13 +634,33 @@ def census_cmd(
 
 
 def _set_flag(key: str, value: bool) -> Path:
-    """Persist a top-level boolean without disturbing the rest of the config."""
+    """Persist a top-level boolean without disturbing sections or credentials.
+
+    This is intentionally line-oriented because the stdlib has no TOML writer. Only a
+    key at the document's top level is replaced; a same-named key inside ``[daemon]`` or
+    another table belongs to the user's config and must remain untouched.
+    """
     path = agentguard_home() / "config.toml"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir()
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    kept = [ln for ln in lines if not ln.strip().startswith(key)]
-    body = "\n".join([f"{key} = {'true' if value else 'false'}", *kept]).strip() + "\n"
-    path.write_text(body, encoding="utf-8")
+    kept: list[str] = []
+    in_table = False
+    replaced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_table = True
+        if not in_table and stripped and not stripped.startswith("#"):
+            name, separator, _ = stripped.partition("=")
+            if separator and name.strip() == key:
+                if not replaced:
+                    kept.append(f"{key} = {'true' if value else 'false'}")
+                    replaced = True
+                continue
+        kept.append(line)
+    if not replaced:
+        kept.insert(0, f"{key} = {'true' if value else 'false'}")
+    write_private_text(path, "\n".join(kept).rstrip() + "\n")
     return path
 
 
@@ -640,6 +727,7 @@ def off_cmd() -> None:
     _ok(f"AgentGuard is OFF ({path})")
     _echo("  hooks remain installed and inert · re-enable with `agentguard on`")
     _echo("  for a single session instead, set AGENTGUARD_DISABLE=1")
+    _echo("  restart the daemon to pick this up:  agentguard daemon stop && agentguard daemon start")
 
 
 @app.command("on")
@@ -649,6 +737,7 @@ def on_cmd() -> None:
     _ok("AgentGuard is ON")
     if not Settings.load().enabled:
         _warn("still disabled by AGENTGUARD_DISABLE in this environment")
+    _echo("  restart the daemon to pick this up:  agentguard daemon stop && agentguard daemon start")
 
 
 # ---------------------------------------------------------------- storage
@@ -723,10 +812,6 @@ def version_cmd() -> None:
     _echo(__version__)
 
 
-if __name__ == "__main__":
-    app()
-
-
 @app.command("bench")
 def bench_cmd(
     repo: Path = typer.Option(..., help="Repository to run the benchmark against."),
@@ -748,3 +833,7 @@ def bench_cmd(
                          runs, out, model=model)
     _echo("\n" + runner.render(payload))
     _echo(f"\nper-run data: {out}")
+
+
+if __name__ == "__main__":
+    app()

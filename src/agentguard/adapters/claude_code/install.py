@@ -19,13 +19,12 @@ and nothing a human put there.
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
 
-from agentguard.core.config import Settings, get_or_create_token
-
-MARKER = "agentguard"
+from agentguard.core.config import Settings, get_or_create_token, write_private_text
 
 # Tools that can change the workspace. SPEC §18 only cares about these.
 MUTATING_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
@@ -53,6 +52,15 @@ def project_settings_path(workspace: Path | None = None) -> Path:
     return (workspace or Path.cwd()) / ".claude" / "settings.local.json"
 
 
+def settings_path(
+    project: bool = False, global_: bool = False, workspace: Path | None = None
+) -> Path:
+    """Resolve an install target, rejecting ambiguous scope flags."""
+    if project and global_:
+        raise ValueError("choose exactly one of --project or --global")
+    return project_settings_path(workspace) if project else global_settings_path()
+
+
 def _http_hook(url: str, token: str, timeout: int) -> dict[str, Any]:
     return {
         "type": "http",
@@ -67,6 +75,25 @@ def _http_hook(url: str, token: str, timeout: int) -> dict[str, Any]:
     }
 
 
+def _command_hook(
+    argv: list[str], timeout: int, status_message: str | None = None
+) -> dict[str, Any]:
+    """Build a Claude Code command hook from argv.
+
+    Claude Code's command-hook schema accepts one shell command string, not a separate
+    executable plus an ``args`` array.  ``shlex.join`` keeps paths and other arguments
+    correctly quoted while preserving the exact argv we intend to run.
+    """
+    hook: dict[str, Any] = {
+        "type": "command",
+        "command": shlex.join(argv),
+        "timeout": timeout,
+    }
+    if status_message is not None:
+        hook["statusMessage"] = status_message
+    return hook
+
+
 def build_hook_config(settings: Settings | None = None, python_exe: str | None = None) -> dict[str, Any]:
     settings = settings or Settings.load()
     token = get_or_create_token()
@@ -78,13 +105,11 @@ def build_hook_config(settings: Settings | None = None, python_exe: str | None =
             {
                 "matcher": "startup|resume|clear",
                 "hooks": [
-                    {
-                        "type": "command",
-                        "command": py,
-                        "args": ["-m", "agentguard.adapters.claude_code.shim", "--ensure-daemon"],
-                        "timeout": TIMEOUTS["SessionStart"],
-                        "statusMessage": "AgentGuard: warming repository index",
-                    }
+                    _command_hook(
+                        [py, "-m", "agentguard.adapters.claude_code.shim", "--ensure-daemon"],
+                        TIMEOUTS["SessionStart"],
+                        "AgentGuard: warming repository index",
+                    )
                 ],
             }
         ],
@@ -95,12 +120,10 @@ def build_hook_config(settings: Settings | None = None, python_exe: str | None =
                     # and tell the developer if it cannot be. Silent fail-open would
                     # leave them believing they are guarded when they are not.
                     # Once per prompt, not per tool call, so the cost is invisible.
-                    {
-                        "type": "command",
-                        "command": py,
-                        "args": ["-m", "agentguard.adapters.claude_code.shim", "--health"],
-                        "timeout": TIMEOUTS["Health"],
-                    },
+                    _command_hook(
+                        [py, "-m", "agentguard.adapters.claude_code.shim", "--health"],
+                        TIMEOUTS["Health"],
+                    ),
                     _http_hook(url, token, TIMEOUTS["UserPromptSubmit"]),
                 ]
             }
@@ -116,9 +139,67 @@ def build_hook_config(settings: Settings | None = None, python_exe: str | None =
     }
 
 
-def _is_ours(group: dict[str, Any]) -> bool:
-    """Identify AgentGuard's own entries so uninstall never touches a human's hooks."""
-    return any(MARKER in json.dumps(hook).lower() for hook in group.get("hooks", []))
+def _command_argv(hook: dict[str, Any]) -> list[str]:
+    """Normalize current and legacy command-hook representations for ownership checks."""
+    command = hook.get("command")
+    if not isinstance(command, str) or not command:
+        return []
+    legacy_args = hook.get("args")
+    if isinstance(legacy_args, list) and all(isinstance(arg, str) for arg in legacy_args):
+        return [command, *legacy_args]
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return []
+
+
+def _is_ours_hook(hook: Any) -> bool:
+    """Identify one AgentGuard hook without matching a user's arbitrary text.
+
+    Older releases emitted ``command`` + ``args``; recognize that exact legacy shape so
+    reinstall/uninstall remains reversible after upgrade. HTTP hooks use the explicit
+    header marker. A user hook mentioning the word "agentguard" is not ours.
+    """
+    if not isinstance(hook, dict):
+        return False
+    headers = hook.get("headers")
+    if isinstance(headers, dict) and headers.get("X-AgentGuard") == "1":
+        return True
+    argv = _command_argv(hook)
+    return (
+        "agentguard.adapters.claude_code.shim" in argv
+        and ("--ensure-daemon" in argv or "--health" in argv)
+    )
+
+
+def _is_ours(group: Any) -> bool:
+    """Whether a hook group contains an AgentGuard-owned hook."""
+    if not isinstance(group, dict):
+        return False
+    hooks = group.get("hooks")
+    return isinstance(hooks, list) and any(_is_ours_hook(hook) for hook in hooks)
+
+
+def _remove_ours_from_group(group: Any) -> Any:
+    """Remove only our hooks, preserving a user's hooks in a mixed group.
+
+    Claude groups can contain multiple hook entries. Treating the group as the ownership
+    unit would delete an unrelated hook whenever a developer placed it beside ours.
+    ``None`` means the group became empty and may be removed by the caller.
+    """
+    if not isinstance(group, dict):
+        return group
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list):
+        return group
+    remaining = [hook for hook in hooks if not _is_ours_hook(hook)]
+    if len(remaining) == len(hooks):
+        return group
+    if not remaining:
+        return None
+    out = dict(group)
+    out["hooks"] = remaining
+    return out
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -132,10 +213,9 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def _save(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".agentguard-tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    # AgentGuard's bearer token is embedded in the HTTP hook headers. Both project-local
+    # and global Claude settings are therefore credential-bearing files.
+    write_private_text(path, json.dumps(data, indent=2) + "\n")
 
 
 def merge_hooks(existing: dict[str, Any], new_hooks: dict[str, Any]) -> dict[str, Any]:
@@ -144,7 +224,11 @@ def merge_hooks(existing: dict[str, Any], new_hooks: dict[str, Any]) -> dict[str
     hooks: dict[str, Any] = dict(out.get("hooks") or {})
 
     for event, groups in new_hooks.items():
-        current = [g for g in (hooks.get(event) or []) if not _is_ours(g)]
+        current = []
+        for group in hooks.get(event) or []:
+            cleaned = _remove_ours_from_group(group)
+            if cleaned is not None:
+                current.append(cleaned)
         hooks[event] = current + list(groups)
 
     out["hooks"] = hooks
@@ -155,7 +239,11 @@ def strip_hooks(existing: dict[str, Any]) -> dict[str, Any]:
     out = dict(existing)
     hooks: dict[str, Any] = dict(out.get("hooks") or {})
     for event in list(hooks):
-        remaining = [g for g in (hooks.get(event) or []) if not _is_ours(g)]
+        remaining = []
+        for group in hooks.get(event) or []:
+            cleaned = _remove_ours_from_group(group)
+            if cleaned is not None:
+                remaining.append(cleaned)
         if remaining:
             hooks[event] = remaining
         else:

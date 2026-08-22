@@ -64,10 +64,11 @@ a localhost round trip (~1–3ms) plus our compute. A `command` hook, by contras
 30–80ms of interpreter startup *per tool call* before doing any work, which eats most of the
 §8 budget.
 
-- **Primary:** long-lived local daemon (FastAPI/uvicorn on 127.0.0.1, ephemeral port,
-  token-authenticated) holding the warm `RepoIndex` in memory. §30.
+- **Primary:** long-lived local daemon (FastAPI/uvicorn on 127.0.0.1, fixed configured port
+  8787 by default, token-authenticated) holding the warm `RepoIndex` in memory. §30.
 - **Fallback:** a stdlib-only `agentguard-hook` shim (command hook) that forwards stdin JSON
-  over a Unix domain socket, for environments where HTTP hooks are unavailable.
+  over local HTTP, for environments where HTTP hooks are unavailable or the shim is used for
+  session startup.
 - **Both fail open.** Daemon down, port moved, timeout exceeded, exception raised → the
   hook returns "no decision" and the agent proceeds. Verified by a test that kills the
   daemon mid-run.
@@ -96,9 +97,8 @@ that a property the code enforces rather than an assumption:
    not be able to launder a dangerous command through a bypassed prompt.
 3. **It always announces itself** via `additionalContext`. Silently changing what the
    agent asked for is a trust hazard even when the change is an improvement.
-4. **`"defer"` is tried first.** If Claude Code honours `updatedInput` alongside `"defer"`,
-   we get the rewrite *and* the developer's permission flow, which is strictly better.
-   Phase 6 settles it; `"allow"` is the fallback the user has authorised.
+4. **`"defer"` is used.** This preserves the developer's permission flow while applying the
+   rewrite. AgentGuard deliberately does not emit `"allow"`, which would grant permission.
 
 Risk accepted knowingly: for the specific call being rewritten, the developer's permission
 prompt is skipped. Invariants 1–3 bound what can be done with that.
@@ -151,8 +151,8 @@ loop-breaker for the Completion Gate.
 - Git via subprocess `git` (faster and fewer failure modes than GitPython for the read-only
   queries we need). `ripgrep` used when present, stdlib walk otherwise.
 - **No vector DB** (§31, explicit).
-- Storage: SQLite (WAL) at `<workspace>/.agentguard/agentguard.db`; global config at
-  `~/.agentguard/config.toml`. §30.
+- Storage: one project-scoped SQLite database (WAL) at `~/.agentguard/agentguard.db`; global
+  config at `~/.agentguard/config.toml`. §30.
 
 ### D7 — Storage: one database, scoped by project
 
@@ -493,11 +493,12 @@ does not, we iterate here rather than proceeding.
 The benchmark answered the question it was moved up to answer, and the answer redirected
 the project. Recorded here because the reasoning matters more than the conclusion.
 
-**What was measured.** Across two repositories (12 files and 1,887 files), two models
+**What was measured.** Historical results across two repositories (12 files and 1,887 files), two models
 (Opus and Haiku), and a genuinely unguarded control arm, the *unguarded* agent hallucinated
 **zero** times — even told outright that a method existed, on a monorepo too large to read
 exhaustively. Meanwhile the evidence engine detects hallucinated references at **90%
-recall / 100% precision** (mutation benchmark, `docs/BENCH-mutation.md`).
+recall / 100% precision** (historical mutation benchmark, `docs/BENCH-mutation.md`; the
+current final snapshot is 98.0% / 100.0% in `docs/BENCH-final.md`).
 
 **So: an excellent detector for a problem current models no longer have.** Not a failure of
 engineering — a failure of targeting. SPEC §3 lists fourteen failure modes and the build
@@ -553,7 +554,8 @@ is architectural.
 
 ### Framing correction
 The SPEC §48 resume line must not claim hallucination reduction; that is unsupported.
-What the measurements support: a detector at 90%/100% with ~1 ms overhead and structural
+What the measurements support: a detector at 98%/100% on the current 400-mutation snapshot
+with ~1 ms overhead and structural
 fail-open, plus a benchmark that found the target failure largely absent in current models
 and redirected the work. Measuring, getting an inconvenient answer, and changing direction
 is the stronger story.

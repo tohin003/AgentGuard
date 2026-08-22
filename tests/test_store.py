@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import stat
 import time
 from pathlib import Path
+
+import pytest
 
 from agentguard.adapters.claude_code import translate as claude
 from agentguard.core.enums import (
@@ -20,6 +23,17 @@ from tests.conftest import pre_tool_use
 
 def make_store(workspace: Path) -> Store:
     return Store.for_workspace(workspace)
+
+
+def test_database_and_wal_files_are_private(workspace):
+    """Prompts and tool metadata must not inherit a world-readable umask."""
+    store = make_store(workspace)
+    store.open_session("s1", "claude-code")
+    store.create_task("s1", "private prompt")
+    for suffix in ("", "-wal", "-shm"):
+        path = Path(f"{store.db.path}{suffix}")
+        if path.exists():
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 class TestSessionsAndTasks:
@@ -39,6 +53,23 @@ class TestSessionsAndTasks:
         assert store.current_task_id("s1") == task_id
 
         store.close_session("s1")
+
+    def test_closing_a_session_closes_all_open_tasks(self, workspace):
+        store = make_store(workspace)
+        store.open_session("s1", "claude-code")
+        task_1 = store.create_task("s1", "first")
+        task_2 = store.create_task("s1", "second")
+
+        store.close_session("s1")
+
+        rows = store.db.query(
+            "SELECT id, status, closed_at FROM tasks WHERE project_id=? ORDER BY created_at",
+            (store.project_id,),
+        )
+        assert {row["id"] for row in rows} == {task_1, task_2}
+        assert {row["status"] for row in rows} == {"closed"}
+        assert all(row["closed_at"] is not None for row in rows)
+        assert store.current_task_id("s1") is None
 
     def test_open_session_is_idempotent(self, workspace):
         store = make_store(workspace)
@@ -188,6 +219,48 @@ class TestProjectIsolation:
         second = store_module.project_identity(tmp_path / "elsewhere" / "checkout-two")
         assert first.id == second.id
 
+    @pytest.mark.parametrize(
+        ("remote", "expected"),
+        [
+            ("https://build-user:super-secret@example.com/org/repo.git", "https://example.com/org/repo.git"),
+            ("git@example.com:org/repo.git", "example.com:org/repo.git"),
+            ("ssh://git@example.com:2222/org/repo.git?token=secret#ref", "ssh://example.com:2222/org/repo.git"),
+        ],
+    )
+    def test_remote_identity_strips_credentials_and_tracking_data(self, remote, expected):
+        from agentguard.core.store import sanitize_git_remote
+
+        result = sanitize_git_remote(remote)
+        assert result == expected
+        assert "secret" not in result
+
+    def test_project_identity_never_persists_remote_credentials(self, tmp_path, monkeypatch):
+        import agentguard.core.store as store_module
+
+        monkeypatch.setattr(
+            store_module,
+            "_git_remote",
+            lambda root: "https://token:secret@example.com/org/repo.git",
+        )
+        identity = store_module.project_identity(tmp_path / "checkout")
+        assert identity.git_remote == "https://example.com/org/repo.git"
+        assert "secret" not in identity.git_remote
+
+    def test_database_open_redacts_legacy_remote_credentials(self, workspace):
+        from agentguard.core.store import Database
+
+        store = make_store(workspace)
+        store.db.write(
+            "UPDATE projects SET git_remote=? WHERE id=?",
+            ("https://token:secret@example.com/org/repo.git", store.project_id),
+        )
+        Database.reset_shared()
+        reopened = Store.for_workspace(workspace)
+        row = reopened.db.query(
+            "SELECT git_remote FROM projects WHERE id=?", (reopened.project_id,)
+        )[0]
+        assert row["git_remote"] == "https://example.com/org/repo.git"
+
 
 class TestBoundedRows:
     """Memory plan §6: never store huge objects unnecessarily."""
@@ -272,6 +345,62 @@ class TestRetention:
         task_id = store.create_task("s1", "keep me")
         store.db.maintain(force=True)
         assert store.current_task_id("s1") == task_id
+
+    def test_old_closed_tasks_and_orphaned_challenges_are_pruned(self, workspace):
+        store = make_store(workspace)
+        store.db.retention.session_summaries_days = 30
+        task_id = store.create_task("s1", "expired task")
+        store.record_challenge(task_id, "fp", "expired concern")
+        store.close_task(task_id)
+        old = time.time() - (90 * 86400)
+        store.db.write(
+            "UPDATE tasks SET created_at=?, closed_at=? WHERE id=? AND project_id=?",
+            (old, old, task_id, store.project_id),
+        )
+        store.db.write(
+            "UPDATE challenges SET first_ts=?, last_ts=? WHERE task_id=? AND project_id=?",
+            (old, old, task_id, store.project_id),
+        )
+
+        removed = store.db.prune()
+
+        assert removed["tasks"] == 1
+        assert removed["challenges"] == 1
+        assert not store.db.query("SELECT 1 FROM tasks WHERE id=?", (task_id,))
+        assert not store.db.query("SELECT 1 FROM challenges WHERE task_id=?", (task_id,))
+
+    def test_open_tasks_and_active_sessions_are_not_pruned(self, workspace):
+        store = make_store(workspace)
+        store.db.retention.session_summaries_days = 30
+        store.open_session("active", "claude-code")
+        task_id = store.create_task("active", "still running")
+        old = time.time() - (90 * 86400)
+        store.db.write(
+            "UPDATE sessions SET started_at=? WHERE id=? AND project_id=?",
+            (old, "active", store.project_id),
+        )
+        store.db.write(
+            "UPDATE tasks SET created_at=? WHERE id=? AND project_id=?",
+            (old, task_id, store.project_id),
+        )
+
+        store.db.prune()
+
+        assert store.db.query("SELECT 1 FROM sessions WHERE id='active'")
+        assert store.db.query("SELECT 1 FROM tasks WHERE id=?", (task_id,))
+
+    def test_database_size_limit_triggers_maintenance_without_disabling_writes(
+        self, workspace, monkeypatch
+    ):
+        store = make_store(workspace)
+        monkeypatch.setattr(type(store.db), "free_megabytes", lambda self: 10_000.0)
+        store.db.disk.max_database_mb = 0.000001
+        store.db.retention.maintenance_interval_hours = 10_000
+
+        assert store.db.database_over_limit
+        assert store.db.maintenance_due
+        assert store.db.writes_enabled
+        assert isinstance(store.db.maintain(), dict)
 
 
 class TestStorageIsNeverADependency:

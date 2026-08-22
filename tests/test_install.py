@@ -8,6 +8,8 @@ exactly reversible.
 from __future__ import annotations
 
 import json
+import shlex
+import stat
 
 import pytest
 
@@ -48,13 +50,27 @@ class TestHookConfig:
         hooks = inst.build_hook_config()["UserPromptSubmit"][0]["hooks"]
         command_hooks = [h for h in hooks if h["type"] == "command"]
         assert len(command_hooks) == 1
-        assert "--health" in command_hooks[0]["args"]
+        assert "args" not in command_hooks[0]
+        assert "--health" in shlex.split(command_hooks[0]["command"])
         assert any(h["type"] == "http" for h in hooks), "the decision path stays on http"
 
     def test_session_start_warms_the_daemon(self):
         hook = inst.build_hook_config()["SessionStart"][0]["hooks"][0]
         assert hook["type"] == "command"
-        assert "--ensure-daemon" in hook["args"]
+        assert "args" not in hook
+        assert "--ensure-daemon" in shlex.split(hook["command"])
+
+    def test_command_hooks_are_shell_safe_and_preserve_executable_paths(self):
+        """Claude receives one command string; quoting must survive paths with spaces."""
+        config = inst.build_hook_config(python_exe="/tmp/python with spaces/bin/python")
+        hook = config["SessionStart"][0]["hooks"][0]
+        assert "args" not in hook
+        assert shlex.split(hook["command"]) == [
+            "/tmp/python with spaces/bin/python",
+            "-m",
+            "agentguard.adapters.claude_code.shim",
+            "--ensure-daemon",
+        ]
 
     def test_only_mutating_tools_are_intercepted(self):
         """Read/Grep/Glob would short-circuit to ALLOW anyway; intercepting is pure cost."""
@@ -77,6 +93,18 @@ class TestHookConfig:
                 for hook in group["hooks"]:
                     assert 0 < hook["timeout"] <= 20
 
+    def test_scope_flags_are_unambiguous(self):
+        with pytest.raises(ValueError, match="choose exactly one"):
+            inst.settings_path(project=True, global_=True)
+        assert inst.settings_path(project=True).name == "settings.local.json"
+        assert inst.settings_path(global_=True).name == "settings.json"
+
+    def test_ownership_marker_is_exact(self):
+        human = {"hooks": [{"type": "command", "command": "echo agentguard is useful"}]}
+        assert not inst._is_ours(human)
+        ours = {"hooks": [{"type": "http", "headers": {"X-AgentGuard": "1"}}]}
+        assert inst._is_ours(ours)
+
 
 class TestInstall:
     def test_creates_file_and_hooks(self, settings_file):
@@ -85,6 +113,7 @@ class TestInstall:
         assert settings_file.exists()
         assert inst.is_installed(settings_file)
         assert "PreToolUse" in result["hooks"]
+        assert stat.S_IMODE(settings_file.stat().st_mode) == 0o600
 
     def test_is_idempotent(self, settings_file):
         inst.install(settings_file)
@@ -113,6 +142,40 @@ class TestInstall:
         result, _ = inst.install(settings_file)
         assert mine in result["hooks"]["PreToolUse"]
         assert len(result["hooks"]["PreToolUse"]) == 2
+
+    def test_uninstall_does_not_remove_user_hook_that_mentions_agentguard(self, settings_file):
+        settings_file.parent.mkdir(parents=True)
+        mine = {
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "echo agentguard is useful"}],
+        }
+        settings_file.write_text(json.dumps({"hooks": {"PreToolUse": [mine]}}))
+        inst.install(settings_file)
+        inst.uninstall(settings_file)
+        assert json.loads(settings_file.read_text()) == {"hooks": {"PreToolUse": [mine]}}
+
+    def test_uninstall_preserves_user_hook_in_a_mixed_group(self, settings_file):
+        """Ownership is per hook entry, not the containing Claude hook group."""
+        settings_file.parent.mkdir(parents=True)
+        user_hook = {"type": "command", "command": "/usr/local/bin/my-linter"}
+        agentguard_hook = {"type": "http", "headers": {"X-AgentGuard": "1"}}
+        settings_file.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "Bash", "hooks": [agentguard_hook, user_hook]}
+                        ]
+                    }
+                }
+            )
+        )
+
+        result, changed = inst.uninstall(settings_file)
+
+        assert changed
+        assert result == {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [user_hook]}]}}
+        assert json.loads(settings_file.read_text()) == result
 
     def test_dry_run_writes_nothing(self, settings_file):
         result, changed = inst.install(settings_file, dry_run=True)
@@ -160,3 +223,11 @@ class TestUninstall:
         settings_file.write_text(json.dumps({"model": "opus"}))
         _, changed = inst.uninstall(settings_file)
         assert not changed
+
+    def test_dry_run_does_not_write(self, settings_file):
+        inst.install(settings_file)
+        before = settings_file.read_text()
+        result, changed = inst.uninstall(settings_file, dry_run=True)
+        assert changed
+        assert result == {}
+        assert settings_file.read_text() == before

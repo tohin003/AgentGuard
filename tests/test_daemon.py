@@ -17,7 +17,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from agentguard.core.config import Settings
+from agentguard.core.config import DaemonSettings, Settings, get_or_create_token
 from agentguard.core.engine import Guard
 from agentguard.daemon.app import create_app
 from tests.conftest import REPO_ROOT, pre_tool_use, session_start, stop_event, user_prompt_submit
@@ -165,6 +165,19 @@ class TestDaemonProcess:
         data = json.loads(path.read_text())
         assert data["port"] == daemon.port
         assert data["token"]
+
+    def test_token_file_is_private(self, isolated_home):
+        path = isolated_home / "token"
+        get_or_create_token()
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+    def test_daemon_settings_reject_non_loopback_hosts(self):
+        assert DaemonSettings(host="127.0.0.1").host == "127.0.0.1"
+        assert DaemonSettings(host="localhost").host == "127.0.0.1"
+        with pytest.raises(ValueError, match="loopback"):
+            DaemonSettings(host="0.0.0.0")
+        with pytest.raises(ValueError, match="loopback"):
+            DaemonSettings(host="192.168.1.10")
 
     def test_serves_real_requests(self, daemon, workspace):
         resp = httpx.get(f"{daemon.url}/health", timeout=5)

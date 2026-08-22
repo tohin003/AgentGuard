@@ -13,13 +13,17 @@ Deliberately stdlib-only, with no import of `agentguard.core` or `agentguard.dae
 (those pull in pydantic/fastapi and would triple startup time). The handshake-reading
 code below is duplicated from `daemon/app.py` for exactly that reason.
 
-Every failure path prints nothing and exits 0 — "no decision" — so a broken AgentGuard is
-indistinguishable from an absent one (SPEC §39).
+Transport failures return no decision and exit 0. The one intentional exception is an
+unrecoverable SessionStart health check, which emits a once-per-session warning so the
+developer knows the session is running unguarded.
 """
 
 from __future__ import annotations
 
+import contextlib
+import ipaddress
 import json
+import math
 import os
 import sys
 
@@ -27,6 +31,24 @@ DEFAULT_TIMEOUT_S = 2.0
 DAEMON_START_TIMEOUT_S = 8.0
 # A localhost round trip is sub-millisecond; this only has to bound the pathological case.
 HEALTH_TIMEOUT_S = 1.0
+MAX_STDIN_BYTES = 1_000_000
+MAX_RESPONSE_BYTES = 64_000
+
+
+def _endpoint(hs: dict) -> tuple[str, int] | None:
+    host = hs.get("host", "127.0.0.1")
+    if isinstance(host, str) and host.strip().lower() == "localhost":
+        host = "127.0.0.1"
+    try:
+        address = ipaddress.ip_address(str(host).strip())
+        port = int(hs["port"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(address, ipaddress.IPv4Address) or not address.is_loopback:
+        return None
+    if not 0 < port <= 65535:
+        return None
+    return str(address), port
 
 
 def _start_timeout() -> float:
@@ -41,7 +63,7 @@ def _start_timeout() -> float:
         value = float(raw)
     except ValueError:
         return DAEMON_START_TIMEOUT_S
-    return value if value > 0 else DAEMON_START_TIMEOUT_S
+    return min(value, 60.0) if math.isfinite(value) and value > 0 else DAEMON_START_TIMEOUT_S
 
 
 def _home() -> str:
@@ -51,8 +73,11 @@ def _home() -> str:
 def _handshake() -> dict | None:
     path = os.path.join(_home(), "daemon.json")
     try:
+        if os.path.islink(path):
+            return None
         with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
+            raw = fh.read(MAX_RESPONSE_BYTES)
+        data = json.loads(raw)
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -77,11 +102,11 @@ def _alive(hs: dict | None) -> bool:
     if not hs:
         return False
     pid = hs.get("pid")
-    if not isinstance(pid, int):
+    if type(pid) is not int or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
-    except OSError:
+    except (OSError, OverflowError, ValueError):
         return False
     return _answers_health(hs, pid)
 
@@ -95,18 +120,19 @@ def _answers_health(hs: dict, pid: int) -> bool:
     """
     import http.client
 
+    endpoint = _endpoint(hs)
+    if endpoint is None:
+        return False
     try:
-        conn = http.client.HTTPConnection(
-            hs.get("host", "127.0.0.1"), int(hs["port"]), timeout=HEALTH_TIMEOUT_S
-        )
-    except (KeyError, TypeError, ValueError):
+        conn = http.client.HTTPConnection(*endpoint, timeout=HEALTH_TIMEOUT_S)
+    except (TypeError, ValueError):
         return False
     try:
         conn.request("GET", "/health")
         response = conn.getresponse()
         if response.status != 200:
             return False
-        body = json.loads(response.read().decode("utf-8", "replace"))
+        body = json.loads(response.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace"))
         return isinstance(body, dict) and body.get("pid") == pid
     except Exception:  # noqa: BLE001 - unreachable, wrong service, garbage body: all "no"
         return False
@@ -121,7 +147,10 @@ def _post(hs: dict, payload: dict, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
     import http.client
 
     body = json.dumps(payload).encode("utf-8")
-    conn = http.client.HTTPConnection(hs.get("host", "127.0.0.1"), int(hs["port"]), timeout=timeout)
+    endpoint = _endpoint(hs)
+    if endpoint is None:
+        return {}
+    conn = http.client.HTTPConnection(*endpoint, timeout=timeout)
     try:
         conn.request(
             "POST",
@@ -133,7 +162,7 @@ def _post(hs: dict, payload: dict, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
             },
         )
         resp = conn.getresponse()
-        raw = resp.read()
+        raw = resp.read(MAX_RESPONSE_BYTES)
         if resp.status != 200 or not raw:
             return {}
         out = json.loads(raw)
@@ -153,32 +182,59 @@ def ensure_daemon(timeout: float | None = None) -> dict | None:
         return hs
 
     import subprocess
-
-    log_dir = _home()
+    # SessionStart can run concurrently for multiple host sessions. Claiming a small
+    # inter-process startup lock makes the check/start/wait sequence one operation: the
+    # second hook waits for the first daemon to publish its handshake, then reuses it
+    # instead of launching a competing process that could clobber credentials.
     try:
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = open(os.path.join(log_dir, "daemon.log"), "ab")  # noqa: SIM115
-    except OSError:
-        log_file = subprocess.DEVNULL
+        from agentguard.daemon.lifecycle import interprocess_lock, open_private_append, startup_lock_path
 
-    try:
-        subprocess.Popen(
-            [sys.executable, "-m", "agentguard.daemon", "run"],
-            stdout=log_file,
-            stderr=log_file,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,  # survives the hook process exiting
-        )
-    except OSError:
+        startup_guard = interprocess_lock(startup_lock_path(_home()), timeout=timeout)
+    except Exception:  # noqa: BLE001 - shim must remain dependency/failure tolerant
+        startup_guard = None
+
+    if startup_guard is None:
         return None
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    with startup_guard as locked:
+        if not locked:
+            hs = _handshake()
+            return hs if _alive(hs) else None
+
+        # Another process may have completed startup while we were acquiring the lock.
         hs = _handshake()
         if _alive(hs):
             return hs
-        time.sleep(0.05)
-    return None
+
+        log_dir = _home()
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = open_private_append(os.path.join(log_dir, "daemon.log"))
+        except OSError:
+            log_file = subprocess.DEVNULL
+
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "agentguard.daemon", "run"],
+                stdout=log_file,
+                stderr=log_file,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,  # survives the hook process exiting
+            )
+        except OSError:
+            return None
+        finally:
+            if log_file is not subprocess.DEVNULL:
+                with contextlib.suppress(OSError):
+                    log_file.close()
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            hs = _handshake()
+            if _alive(hs):
+                return hs
+            time.sleep(0.05)
+        return None
 
 
 HEALTH_NOTICE = (
@@ -203,9 +259,9 @@ def _already_notified(session_id: str) -> bool:
     if os.path.exists(marker):
         return True
     try:
-        os.makedirs(_home(), exist_ok=True)
-        with open(marker, "w", encoding="utf-8") as fh:
-            fh.write(str(os.getpid()))
+        from agentguard.daemon.lifecycle import create_private_marker
+
+        return not create_private_marker(marker, str(os.getpid()))
     except OSError:
         pass
     return False
@@ -234,7 +290,9 @@ def health_check(payload: dict) -> int:
 def main() -> int:
     args = set(sys.argv[1:])
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.read(MAX_STDIN_BYTES + 1)
+        if len(raw.encode("utf-8", "surrogatepass")) > MAX_STDIN_BYTES:
+            return 0
         payload = json.loads(raw) if raw.strip() else {}
     except (OSError, ValueError):
         return 0

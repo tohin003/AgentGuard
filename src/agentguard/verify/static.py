@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentguard.repo import symbols_ts
+from agentguard.repo.paths import relative_path
 from agentguard.repo.scanner import detect_language
 
 
@@ -30,7 +31,16 @@ def check_files(root: Path, paths: set[str]) -> list[SyntaxProblem]:
     """Files that no longer parse. An unreadable or deleted file is not a problem here."""
     problems: list[SyntaxProblem] = []
     for rel in sorted(paths):
+        safe = relative_path(root, rel)
+        if safe is None:
+            continue
+        rel = safe
         full = root / rel
+        try:
+            if not full.resolve(strict=False).is_relative_to(root.resolve(strict=False)):
+                continue
+        except (OSError, RuntimeError):
+            continue
         if not full.is_file():
             continue
         language = detect_language(rel)

@@ -22,14 +22,22 @@ FIXTURES = Path(__file__).parent / "fixtures"
 @pytest.fixture
 def pyrepo(tmp_path) -> Path:
     dest = tmp_path / "pyrepo"
-    shutil.copytree(FIXTURES / "pyrepo", dest)
+    shutil.copytree(
+        FIXTURES / "pyrepo",
+        dest,
+        ignore=shutil.ignore_patterns("__pycache__", "*.py[cod]"),
+    )
     return dest
 
 
 @pytest.fixture
 def jsrepo(tmp_path) -> Path:
     dest = tmp_path / "jsrepo"
-    shutil.copytree(FIXTURES / "jsrepo", dest)
+    shutil.copytree(
+        FIXTURES / "jsrepo",
+        dest,
+        ignore=shutil.ignore_patterns("__pycache__", "*.py[cod]"),
+    )
     return dest
 
 
@@ -244,6 +252,16 @@ class TestGit:
         (git_pyrepo / "src" / "shop" / "models.py").write_text("# edited\n")
         fresh = RepoIndex(git_pyrepo)
         assert "src/shop/models.py" in fresh.git.dirty
+
+    def test_reports_both_sides_of_a_git_rename(self, git_pyrepo):
+        old = git_pyrepo / "src" / "shop" / "api" / "orders.py"
+        new = git_pyrepo / "src" / "shop" / "api" / "purchases.py"
+        old.rename(new)
+
+        state = RepoIndex(git_pyrepo).git
+
+        assert "src/shop/api/purchases.py" in state.dirty
+        assert "src/shop/api/orders.py" in state.dirty
 
 
 class TestIncrementalRefresh:

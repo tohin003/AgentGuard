@@ -27,6 +27,9 @@ class TaskState:
     task_id: str
     spec: TaskSpec
     started_at: float = field(default_factory=time.time)
+    # The host session owns the task.  Keeping this alongside the in-memory state lets
+    # the engine reject a stale or forged task id from another concurrent session.
+    session_id: str = ""
 
     touched_files: set[str] = field(default_factory=set)
     deleted_files: set[str] = field(default_factory=set)

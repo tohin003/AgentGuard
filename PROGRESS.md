@@ -5,7 +5,10 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 
 **Current phase:** Phase 8 — promote the Completion Gate (Phase 7's instrument is built; the census itself needs an observation window)
 **Act I goal:** SPEC §50 milestone (Phase 6 real-world validation) — met
-**Suite:** 441 tests passing · ruff clean
+**Suite:** 478 tests passing · ruff clean
+
+**Current reliability snapshot:** `docs/BENCH-final.md` records 1.60 ms p95 through the
+installed HTTP hook and 98.0% recall / 100% precision on 400 seeded hallucination mutations.
 
 ---
 
@@ -25,7 +28,7 @@ Plan: `IMPLEMENTATION_PLAN.md` · Source of truth: `AgentGuard — Host-Powered 
 | 7b | **Failure-mode census (observe-only)** | ⚠️ **instrument done** | built + verified; the count needs a week of real work — `docs/CENSUS.md` |
 | 8 | Promote Completion Gate, demote Evidence Engine | ⬜ **next** | — |
 | 9 | Measure proportional planning (§2/§12/§13) | ⬜ | — |
-| 8 | Act II — performance & reliability hardening | ⬜ blocked | — |
+| 8 | Act II — performance & reliability hardening | ✅ **done** | daemon lifecycle, path confinement, storage safety, and hook fail-open hardening |
 | 9 | Act II — agent interoperability (MCP, Cursor, Codex) | ⬜ blocked | — |
 | 10 | Act II — persistent project memory foundation | ⬜ blocked | — |
 | 11 | Act II — local semantic memory (sqlite-vec + FTS5) | ⬜ blocked | — |
@@ -155,12 +158,11 @@ and passed throughout. Only an end-to-end test through the Guard exposed it.
 | **MODIFY under a narrowing invariant** (plan D2) | ✅ rewrite-first, re-checked, always announced |
 | **A dead AgentGuard says so** (plan D9) | ✅ revive → silent; unrecoverable → visible message, exit 1, blocks nothing |
 
-**Two user decisions implemented.** `MODIFY` may now emit `"allow"`, which skips the
-developer's permission prompt for that call — justified only because the rewrite is a
-*narrowing*, so the code proves it: a rewrite may never extend reach, its output is
-re-checked by the risk checks, and it always announces itself. Anything that cannot be made
-safe falls through to `REQUEST_REVIEW` instead. And fail-open is no longer silent: a daemon
-that cannot be revived is reported to the developer, who decides whether to continue.
+**Two user decisions implemented.** `MODIFY` uses `"defer"` plus `updatedInput`, preserving
+the developer's permission flow while applying only a proven narrowing rewrite. Anything
+that cannot be made safe falls through to `REQUEST_REVIEW` instead. And fail-open is no
+longer silent: a daemon that cannot be revived is reported to the developer, who decides
+whether to continue.
 
 **Two bugs found, one serious.**
 
@@ -293,7 +295,7 @@ definition of "it works".
 | `test_s12_proportional_planning` (57 tests) | §2, §9, §10, §12, §13, §34 | ✅ |
 | `test_s14_evidence` (57 tests) | §14, §15, §16, §17, §39 | ✅ |
 | `test_s18_validation_and_completion` (68 tests) | §18, §19, §20 | ✅ |
-| `test_s33_end_to_end` | §33 | ⬜ Phase 5 |
+| `tests/test_end_to_end.py` | §33 | ✅ |
 
 ---
 
@@ -487,7 +489,8 @@ Gate; `session_end` closes out and runs storage maintenance.
   every decision action.
 - **Fail-open is structural, not aspirational.** `Guard.handle()` catches everything; the
   daemon returns `200 {}` on auth failure, bad JSON, unknown adapter and internal crash; the
-  shim exits 0 silently on every error path.
+  shim exits 0 with no decision on transport errors, while an unrecoverable startup health
+  check emits one visible warning per session.
 - **Fixed daemon port (8787)** because the hook URL is baked into settings.json at install
   time and cannot be rewritten per daemon restart. `doctor` detects a port conflict.
 

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from agentguard.repo.index import RepoIndex
+from agentguard.repo.paths import relative_path
 
 
 @dataclass(slots=True)
@@ -91,7 +92,10 @@ def detect_runners(index: RepoIndex) -> list[TestRunner]:
         runners.append(TestRunner("pytest", "pytest", "python test files present"))
     elif "pyproject.toml" in files:
         try:
-            text = (index.root / "pyproject.toml").read_text(encoding="utf-8")
+            manifest = relative_path(index.root, "pyproject.toml")
+            if manifest is None:
+                return runners
+            text = (index.root / manifest).read_text(encoding="utf-8")
             if "[tool.pytest" in text or "pytest" in text:
                 runners.append(TestRunner("pytest", "pytest", "pytest configured in pyproject.toml"))
         except OSError:
@@ -101,7 +105,10 @@ def detect_runners(index: RepoIndex) -> list[TestRunner]:
         try:
             import json
 
-            data = json.loads((index.root / "package.json").read_text(encoding="utf-8"))
+            manifest = relative_path(index.root, "package.json")
+            if manifest is None:
+                return runners
+            data = json.loads((index.root / manifest).read_text(encoding="utf-8"))
             scripts = data.get("scripts") or {}
             dev = {**(data.get("devDependencies") or {}), **(data.get("dependencies") or {})}
             if "vitest" in dev:
@@ -194,7 +201,10 @@ def parse_output(command: str, output: str) -> TestOutcome:
         if counts:
             outcome.failed = counts.get("failed", 0) + counts.get("error", 0) + counts.get("errors", 0)
             outcome.total = sum(counts.values())
-            outcome.passed = outcome.failed == 0
+            # A run containing only skipped/xfail tests did execute a command, but it
+            # did not establish a passing test result.  Treating ``5 skipped`` as a
+            # pass would let the completion gate rubber-stamp an unverified change.
+            outcome.passed = False if outcome.failed else (True if counts.get("passed", 0) else None)
         elif "no tests ran" in text.lower():
             outcome.passed = None
             outcome.summary = outcome.summary or "no tests ran"
@@ -208,7 +218,7 @@ def parse_output(command: str, output: str) -> TestOutcome:
             counts = {kind.lower(): int(n) for n, kind in _JEST_COUNTS.findall(body)}
             outcome.failed = counts.get("failed", 0)
             outcome.total = sum(counts.values())
-            outcome.passed = outcome.failed == 0
+            outcome.passed = False if outcome.failed else (True if counts.get("passed", 0) else None)
         elif "FAIL" in text:
             outcome.passed = False
             outcome.summary = "reported FAIL"
@@ -217,7 +227,13 @@ def parse_output(command: str, output: str) -> TestOutcome:
     if runner == "cargo":
         match = _CARGO.search(text)
         if match:
-            outcome.passed = match.group("status") == "ok"
+            passed_match = re.search(r"(\d+)\s+passed", match.group("counts"), re.IGNORECASE)
+            passed_count = int(passed_match.group(1)) if passed_match else 0
+            outcome.passed = (
+                False
+                if match.group("status") != "ok"
+                else (True if passed_count else None)
+            )
             outcome.summary = match.group("counts").strip()[:200]
         return outcome
 

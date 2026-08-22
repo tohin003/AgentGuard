@@ -19,6 +19,7 @@ from agentguard.repo.models import (
     LANGUAGE_BY_EXT,
     FileRecord,
 )
+from agentguard.repo.paths import relative_path
 
 TEST_DIR_NAMES: frozenset[str] = frozenset({"test", "tests", "__tests__", "spec", "specs", "e2e"})
 TEST_FILE_PREFIXES: tuple[str, ...] = ("test_",)
@@ -106,11 +107,23 @@ def scan(root: Path, settings: IndexSettings | None = None) -> dict[str, FileRec
         if from_git and any(part in excluded for part in parts[:-1]):
             continue
 
+        # `git ls-files` and `os.walk` can both return a symlinked file.  Resolve the
+        # candidate before stat/read so a link inside the repository cannot smuggle an
+        # outside file into the evidence index.  Ordinary relative paths retain their
+        # original spelling as the index key; this check is only a containment guard.
+        if relative_path(root, rel) is None:
+            continue
+
         full = root / rel
         try:
             st = full.stat()
         except OSError:
             continue  # deleted between listing and stat, or a broken symlink
+        try:
+            if not full.resolve(strict=False).is_relative_to(root):
+                continue
+        except (OSError, RuntimeError):
+            continue
         if not os.path.isfile(full):
             continue
         if st.st_size > settings.max_file_bytes:

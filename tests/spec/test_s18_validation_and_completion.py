@@ -404,10 +404,12 @@ class TestOutputParsing:
             ("pytest -q", "..\n=========== 2 passed in 0.1s ===========\n", True),
             ("pytest -q", "F.\n====== 1 failed, 1 passed in 0.1s ======\n", False),
             ("pytest", "===== 3 passed, 1 skipped in 0.4s =====\n", True),
+            ("pytest", "===== 3 skipped in 0.4s =====\n", None),
             ("pytest", "==== 2 errors in 0.1s ====\n", False),  # collection errors are failures
             ("npx vitest run", "Tests:  4 passed (4)\n", True),
             ("npx jest", "Tests:       1 failed, 3 passed, 4 total\n", False),
             ("cargo test", "test result: ok. 7 passed; 0 failed;\n", True),
+            ("cargo test", "test result: ok. 0 passed; 0 failed; 4 ignored;\n", None),
             ("cargo test", "test result: FAILED. 5 passed; 2 failed;\n", False),
             ("go test ./...", "ok  \texample/pkg\t0.01s\n", True),
             ("go test ./...", "FAIL\texample/pkg\t0.01s\n", False),
