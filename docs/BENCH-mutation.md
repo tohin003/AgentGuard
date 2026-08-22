@@ -1,4 +1,8 @@
-# Mutation benchmark — does the evidence engine actually work?
+# Historical mutation benchmark — does the evidence engine actually work?
+
+> This document records an earlier benchmark run. For the current implementation's latest
+> numbers, see [`BENCH-final.md`](BENCH-final.md): **98.0% recall and 100% precision** on
+> 400 seeded mutations in the current repository.
 
 **Method:** take working code from real repositories, programmatically introduce a
 reference that genuinely does not exist, ask AgentGuard whether it notices. Ground truth is
@@ -7,7 +11,7 @@ known by construction. **Zero agent sessions.**
     recall    = seeded hallucinations flagged / seeded hallucinations
     precision = correct flags / all flags (unmutated code must stay silent)
 
-## Result
+## Historical result
 
 | Repository | Recall | Precision |
 |---|---|---|
@@ -55,3 +59,6 @@ behavioural question needs live sessions and remains open.
 **Limit worth stating:** the mutations are ones AgentGuard could in principle catch —
 references to things that genuinely do not exist. This measures how well it finds what it
 was designed to find, not how often agents fail in ways it was never built for.
+
+These historical figures remain useful for showing how the detector evolved. They are not
+the current release snapshot; use `BENCH-final.md` for current latency and coverage numbers.

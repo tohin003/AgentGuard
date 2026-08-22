@@ -2,7 +2,8 @@
 
 **A reliability and reasoning control layer for AI coding agents.**
 
-AgentGuard attaches to an existing coding agent — Claude Code today, Cursor and Codex next —
+AgentGuard attaches to an existing coding agent — Claude Code today, with an adapter path for
+Cursor, Codex, and custom agents —
 and makes that agent's mistakes hard to execute. It does not replace the agent, and it does
 not contain an LLM of its own.
 
@@ -150,12 +151,13 @@ agentguard census         # which of SPEC §3's 17 failure modes actually occurr
 agentguard observe off
 ```
 
-This exists because the benchmark ([`docs/BENCH-mutation.md`](docs/BENCH-mutation.md))
-found that the failure AgentGuard was best at detecting — hallucinated references — is one
-current models essentially no longer commit. Rather than guess again at which failure to
-target, the census counts. **While observe-only is on, AgentGuard guards nothing**; that is
-the price of measuring an unguarded agent. Method and caveats:
-[`docs/CENSUS.md`](docs/CENSUS.md).
+This exists because the benchmark found that the failure AgentGuard was best at detecting —
+hallucinated references — is one current models essentially no longer commit. Rather than
+guess again at which failure to target, the census counts. **While observe-only is on,
+AgentGuard guards nothing**; that is the price of measuring an unguarded agent. Method and
+caveats: [`docs/CENSUS.md`](docs/CENSUS.md). The historical detector study is
+[`docs/BENCH-mutation.md`](docs/BENCH-mutation.md); the current release snapshot is
+[`docs/BENCH-final.md`](docs/BENCH-final.md).
 
 ### Configuration And Data
 
@@ -191,6 +193,97 @@ installed HTTP hook measured 1.60 ms p95, and the repository mutation benchmark 
 latency measurements, not a causal guarantee for every real agent session. A paired live
 control/guarded run is required to measure outcome improvement.
 
+## Frequently Asked Questions
+
+### When is AgentGuard useful in everyday agent work?
+
+AgentGuard is most useful when an agent can move quickly but its assumptions or “done” claims
+need an independent check. Typical examples include:
+
+- refactors and renames where a stale symbol, import, or call site can be missed;
+- bug fixes where the agent starts changing files outside the requested scope;
+- migrations and dependency changes where manifests, configuration, and tests must agree;
+- shell commands that are destructive, irreversible, unusually broad, or risky;
+- multi-file changes where the agent should run relevant tests before finishing;
+- unfamiliar repositories where the agent needs repository-grounded context instead of guesses;
+- long sessions or concurrent sessions where task history and touched-file state must stay
+  separate.
+
+For a simple read or a routine safe edit, AgentGuard normally stays silent. It adds discipline
+around the edges of an agent's workflow rather than interrupting every action.
+
+### Does it work with Claude Code today?
+
+Yes. Claude Code is the supported built-in adapter today:
+
+```bash
+agentguard install claude --project
+agentguard doctor
+```
+
+The adapter uses Claude Code hook events, a local authenticated HTTP daemon for the hot path,
+and a small command shim for session startup and health checks.
+
+### Does it support Codex, Cursor, or my own coding agent?
+
+Not as prebuilt adapters yet. The reliability engine itself is agent-agnostic; only the edge
+adapter knows a host's event and response format. Built-in adapters for other hosts can be
+added without rewriting the repository index, evidence engine, scope checks, or completion
+gate.
+
+### Can I build a custom adapter?
+
+Yes. A custom adapter should:
+
+1. Translate the host's lifecycle, prompt, tool-call, tool-result, stop, and session-end
+   payloads into `agentguard.core.events.AgentEvent`.
+2. Translate `agentguard.core.models.Decision` back into the host's native allow/deny/ask/
+   block/context format.
+
+The Claude implementation is the reference at
+[`src/agentguard/adapters/claude_code/translate.py`](src/agentguard/adapters/claude_code/translate.py).
+The normalized core is exposed through `Guard.handle(event)`, so an adapter can be a hook,
+MCP server, CLI wrapper, IDE extension, or another local transport.
+
+### Can it protect agents powered by any LLM?
+
+Potentially, yes, if the host exposes a way to observe tool calls and return a decision or
+context before or after execution. AgentGuard does not call an LLM or depend on a provider
+SDK; the same deterministic core can sit beside Claude, OpenAI-compatible agents, local
+models, or a custom orchestration loop. Per host, you must implement the transport, event
+translation, and response semantics.
+
+It cannot add protection to a black-box chat UI that exposes no tool or lifecycle hooks. In
+that case, integrate at the tool executor, MCP, CLI, or gateway boundary.
+
+### Can I customize AgentGuard for my workflow?
+
+Yes. Common customization points are:
+
+- `Settings` and `config.toml` for daemon, latency, retention, disk, and challenge limits;
+- repository exclusion and language/index settings;
+- validator and evidence rules for project-specific commands or conventions;
+- adapter code for custom tools, event names, and response formats;
+- telemetry and census detectors for organization-specific failure modes.
+
+Keep the core safety invariants intact: unknown evidence should remain unknown, path checks
+must stay confined to the workspace, persistence must never be required for a decision, and
+hooks should fail open if the guard is unavailable. Run the full test suite after changing an
+adapter or validator.
+
+### Does customization require adding an LLM?
+
+No. AgentGuard deliberately has no internal LLM. You can add a separate policy engine or
+model outside the core if desired, but the default system remains deterministic, local,
+inspectable, and independent of any model provider.
+
+### Can it run in CI or outside an interactive coding session?
+
+The core `Guard` and repository index can be used from Python or a wrapper process, and the
+CLI includes repository inspection and benchmark commands. The polished installation path is
+Claude Code hooks; a CI, IDE, MCP, or Codex integration should provide a corresponding
+adapter and choose whether findings block, request review, or are only recorded.
+
 ### Development
 
 From this repository:
@@ -203,7 +296,8 @@ uv sync
 ```
 
 The project intentionally has no LLM/provider SDK dependency. Claude Code is the current
-adapter; Cursor and Codex adapters are planned separately.
+built-in adapter; Cursor and Codex adapters are not shipped yet, but the normalized adapter
+interface is ready for them.
 
 ## License
 
